@@ -58,8 +58,11 @@ class WeightsBiasesTracker:
         project: str = "prismatic",
         entity: Optional[str] = None,
         group: str = "align",
+        use_wandb: bool = False,
     ) -> None:
         self.run_id, self.run_dir, self.hparams = run_id, run_dir, hparams
+
+        self.use_wandb = use_wandb
 
         # Get W&B-Specific Initialization Parameters
         self.project, self.entity, self.group, self.wandb_dir = project, entity, group, self.run_dir
@@ -69,26 +72,29 @@ class WeightsBiasesTracker:
 
     @overwatch.rank_zero_only
     def initialize(self) -> None:
-        wandb.init(
-            name=self.run_id,
-            dir=self.wandb_dir,
-            config=self.hparams,
-            project=self.project,
-            entity=self.entity,
-            group=self.group,
-        )
+        if self.use_wandb:
+            wandb.init(
+                name=self.run_id,
+                dir=self.wandb_dir,
+                config=self.hparams,
+                project=self.project,
+                entity=self.entity,
+                group=self.group,
+            )
 
     @overwatch.rank_zero_only
     def write_hyperparameters(self) -> None:
-        wandb.config = self.hparams
+        if self.use_wandb:
+            wandb.config = self.hparams
 
     @overwatch.rank_zero_only
     def write(self, global_step: int, metrics: Dict[str, Union[int, float]]) -> None:
-        wandb.log(metrics, step=global_step)
+        if self.use_wandb:
+            wandb.log(metrics, step=global_step)
 
     @staticmethod
-    def finalize() -> None:
-        if overwatch.is_rank_zero():
+    def finalize(self) -> None:
+        if overwatch.is_rank_zero() and self.use_wandb:
             wandb.finish()
 
         # A job gets 210 seconds to get its affairs in order
@@ -218,6 +224,7 @@ class VLAMetrics:
         window_size: int = 1,
         resume_step: Optional[int] = None,
         resume_epoch: Optional[int] = None,
+        use_wandb: bool = False
     ) -> None:
         self.run_id, self.run_dir, self.hparams = run_id, run_dir, hparams
 
@@ -228,7 +235,7 @@ class VLAMetrics:
                 tracker = JSONLinesTracker(run_id, run_dir, hparams)
             elif tracker_type == "wandb":
                 tracker = WeightsBiasesTracker(
-                    run_id, run_dir, hparams, project=wandb_project, entity=wandb_entity, group="vla-train"
+                    run_id, run_dir, hparams, project=wandb_project, entity=wandb_entity, group="vla-train", use_wandb=use_wandb
                 )
             else:
                 raise ValueError(f"Tracker with type `{tracker_type} is not supported!")

@@ -82,6 +82,7 @@ class TrainConfig:
     trackers: Tuple[str, ...] = ("jsonl", "wandb")                  # Trackers to initialize (if W&B, add config!)
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
+    use_wandb: bool = False
 
     def __post_init__(self) -> None:
         """Lift optimization parameters from `self.vla` for ease of use =>> validate on `expected_world_size`"""
@@ -283,6 +284,7 @@ def train(cfg: TrainConfig) -> None:
         wandb_entity=cfg.wandb_entity,
         resume_step=cfg.resume_step,
         resume_epoch=cfg.resume_epoch,
+        use_wandb=cfg.use_wandb
     )
 
     # Run VLA Training

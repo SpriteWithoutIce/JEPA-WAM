@@ -17,4 +17,4 @@ torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
     --vla.learning_rate 2e-5 \
     --vla.max_steps 100000 \
     --save_interval 2500 \
-    --seed 7
+    --seed 7 \
