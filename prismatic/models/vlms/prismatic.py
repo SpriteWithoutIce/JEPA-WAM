@@ -133,6 +133,13 @@ class PrismaticVLM(VLM):
             self.all_module_keys.append("aux_head")
         self.trainable_module_keys = []
 
+        if self.action_head is not None:
+            overwatch.info(
+                "Initialized Action Head `%s` (placeholder tokens = %d)",
+                self.action_head_type,
+                self.action_placeholder_tokens,
+            )
+
         # === Generation Utilities ===
         #   => For computing likelihoods --> get tokens corresponding to "True", "False" and "Yes", "No"
         self.string2idx = {}
@@ -195,6 +202,14 @@ class PrismaticVLM(VLM):
 
         :param stage: Pretraining stage in < "align" | "finetune" | "full-finetune" | "vla-train" | "vla-full-train" >
         """
+        def log_action_head_trainable(prefix: str = "[TRAINABLE] 🔥 =>>") -> None:
+            if self.action_head is not None:
+                overwatch.info(
+                    f"{prefix} Action Head `{self.action_head_type}` "
+                    f"(placeholders={self.action_placeholder_tokens})",
+                    ctx_level=1,
+                )
+
         if stage == "align":
             self.vision_backbone.requires_grad_(False)
             self.llm_backbone.requires_grad_(False)
@@ -235,7 +250,7 @@ class PrismaticVLM(VLM):
             overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
             if self.action_head is not None:
-                overwatch.info(f"[TRAINABLE] 🔥 =>> Action Head (GR00T)", ctx_level=1)
+                log_action_head_trainable()
             if self.aux_head is not None:
                 overwatch.info(f"[TRAINABLE] 🔥 =>> Aux Head", ctx_level=1)
 
@@ -244,9 +259,17 @@ class PrismaticVLM(VLM):
             self.vision_backbone.requires_grad_(True)
             self.llm_backbone.requires_grad_(True)
             self.projector.requires_grad_(True)
+            if self.action_head is not None:
+                self.action_head.requires_grad_(True)
+            if self.aux_head is not None:
+                self.aux_head.requires_grad_(True)
 
             # Add to `self.trainable_module_keys`
             self.trainable_module_keys = ["vision_backbone", "projector", "llm_backbone"]
+            if self.action_head is not None:
+                self.trainable_module_keys.append("action_head")
+            if self.aux_head is not None:
+                self.trainable_module_keys.append("aux_head")
 
             # Update Trackers
             self.vision_backbone_requires_grad = True
@@ -255,6 +278,9 @@ class PrismaticVLM(VLM):
             overwatch.info(f"[TRAINABLE] 🔥 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            log_action_head_trainable()
+            if self.aux_head is not None:
+                overwatch.info(f"[TRAINABLE] 🔥 =>> Aux Head", ctx_level=1)
 
         elif stage in {"last-layer-finetune", "vla-last-layer-train"}:
             self.vision_backbone.requires_grad_(False)
@@ -287,9 +313,17 @@ class PrismaticVLM(VLM):
             # Unfreeze final LLM layer
             for module in self.llm_backbone.last_layer_finetune_modules:
                 module.requires_grad_(True)
+            if self.action_head is not None:
+                self.action_head.requires_grad_(True)
+            if self.aux_head is not None:
+                self.aux_head.requires_grad_(True)
 
             # Add to `self.trainable_module_keys`
             self.trainable_module_keys = ["vision_backbone", "projector", "llm_backbone"]
+            if self.action_head is not None:
+                self.trainable_module_keys.append("action_head")
+            if self.aux_head is not None:
+                self.trainable_module_keys.append("aux_head")
 
             # Update Trackers
             self.vision_backbone_requires_grad = True
@@ -299,6 +333,9 @@ class PrismaticVLM(VLM):
             overwatch.info(f"[TRAINABLE]                 🔥   =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)  # noqa: E501
             overwatch.info(f"[Frozen, except last layer] 🥶🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)  # noqa: E501
             overwatch.info(f"[TRAINABLE]                 🔥   =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            log_action_head_trainable("[TRAINABLE]                 🔥   =>>")
+            if self.aux_head is not None:
+                overwatch.info(f"[TRAINABLE]                 🔥   =>> Aux Head", ctx_level=1)
             # fmt: on
 
         else:
@@ -456,6 +493,7 @@ class PrismaticVLM(VLM):
                 patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values})
             else:
                 patch_features = self.vision_backbone(pixel_values[multimodal_indices])
+        current_vjepa = patch_features
 
         # Encode future frames for aux target (if provided)
         vjepa_target = None
@@ -570,6 +608,7 @@ class PrismaticVLM(VLM):
         total_loss = llm_output.loss if llm_output.loss is not None else torch.tensor(0.0, device=input_ids.device)
         loss_action = None
         loss_aux = None
+        aux_pred = None
 
         if llm_hidden is not None:
             # Determine number of views from pixel_values shape
@@ -624,7 +663,10 @@ class PrismaticVLM(VLM):
             "logits": llm_output.logits,
             "llm_hidden": llm_hidden,
             "vjepa_target": vjepa_target,
+            "current_vjepa": current_vjepa,
         }
+        if aux_pred is not None:
+            output["aux_pred"] = aux_pred
         if loss_action is not None:
             output["loss_action"] = loss_action
         if loss_aux is not None:

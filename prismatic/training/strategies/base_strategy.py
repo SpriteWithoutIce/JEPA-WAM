@@ -15,6 +15,8 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
 from tqdm import tqdm
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -252,6 +254,99 @@ class TrainingStrategy(ABC):
                 self.save_checkpoint(metrics.run_dir, metrics.global_step, epoch, loss.item())
                 dist.barrier()
 
+    @staticmethod
+    def _image_tensor_to_pil(image: torch.Tensor) -> Image.Image:
+        mean = torch.tensor([0.485, 0.456, 0.406], device=image.device, dtype=image.dtype).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=image.device, dtype=image.dtype).view(3, 1, 1)
+        image = (image.detach() * std + mean).clamp(0, 1)
+        array = (image.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        return Image.fromarray(array)
+
+    @staticmethod
+    def _embedding_to_heatmap(embedding: torch.Tensor, size: tuple[int, int]) -> Image.Image:
+        heat = embedding.detach().float().norm(dim=-1)
+        heat = heat - heat.min()
+        heat = heat / heat.max().clamp_min(1e-6)
+        heat = F.interpolate(heat[None, None], size=size, mode="bilinear", align_corners=False)[0, 0]
+        h = heat.cpu().numpy()
+
+        r = np.clip(1.5 - np.abs(4.0 * h - 3.0), 0.0, 1.0)
+        g = np.clip(1.5 - np.abs(4.0 * h - 2.0), 0.0, 1.0)
+        b = np.clip(1.5 - np.abs(4.0 * h - 1.0), 0.0, 1.0)
+        color = np.stack([r, g, b], axis=-1)
+        return Image.fromarray((color * 255).astype(np.uint8))
+
+    @staticmethod
+    def _overlay_heatmap(image: Image.Image, heatmap: Image.Image, alpha: float = 0.45) -> Image.Image:
+        return Image.blend(image.convert("RGB"), heatmap.convert("RGB"), alpha)
+
+    @staticmethod
+    def _concat_images(images: list[Image.Image]) -> Image.Image:
+        widths, heights = zip(*(img.size for img in images))
+        canvas = Image.new("RGB", (sum(widths), max(heights)))
+        x = 0
+        for img in images:
+            canvas.paste(img.convert("RGB"), (x, 0))
+            x += img.size[0]
+        return canvas
+
+    def _save_embedding_visualizations(
+        self,
+        batch: dict,
+        output: dict,
+        step: int,
+        run_dir: Path,
+        max_samples: int = 1,
+    ) -> None:
+        try:
+            current_vjepa = output.get("current_vjepa")
+            aux_pred = output.get("aux_pred")
+            vjepa_target = output.get("vjepa_target")
+            images = batch.get("pixel_values")
+            future_images = batch.get("future_pixel_values")
+            if current_vjepa is None or aux_pred is None or vjepa_target is None or images is None or future_images is None:
+                return
+
+            current_vjepa = current_vjepa.detach().cpu()
+            aux_pred = aux_pred.detach().cpu()
+            vjepa_target = vjepa_target.detach().cpu()
+            images = images.detach().cpu()
+            future_images = future_images.detach().cpu()
+
+            if images.dim() == 4:
+                images = images.unsqueeze(1)
+            if future_images.dim() == 5:
+                future_images = future_images.unsqueeze(1)
+
+            B, V, _, H, W = images.shape
+            _, _, T_aux, H_aux, W_aux, _ = aux_pred.shape
+            current_vjepa = current_vjepa.reshape(B, V, H_aux * W_aux, -1).reshape(B, V, H_aux, W_aux, -1)
+
+            out_dir = Path(run_dir) / "debug_embedding_viz" / f"step-{step:06d}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            for b in range(min(max_samples, B)):
+                for v in range(V):
+                    current_img = self._image_tensor_to_pil(images[b, v])
+                    current_heat = self._embedding_to_heatmap(current_vjepa[b, v], current_img.size[::-1])
+                    current_overlay = self._overlay_heatmap(current_img, current_heat)
+                    current_overlay.save(out_dir / f"sample{b}_view{v}_current_jepa_overlay.png")
+
+                    for t in range(T_aux):
+                        frame_idx = min(future_images.shape[2] - 1, t * 2 + 1)
+                        future_img = self._image_tensor_to_pil(future_images[b, v, frame_idx])
+                        pred_heat = self._embedding_to_heatmap(aux_pred[b, v, t], future_img.size[::-1])
+                        gt_heat = self._embedding_to_heatmap(vjepa_target[b, v, t], future_img.size[::-1])
+                        pred_overlay = self._overlay_heatmap(future_img, pred_heat)
+                        gt_overlay = self._overlay_heatmap(future_img, gt_heat)
+                        self._concat_images([future_img, pred_overlay, gt_overlay]).save(
+                            out_dir / f"sample{b}_view{v}_future_t{t}_raw_pred_gt.png"
+                        )
+
+            overwatch.info("Saved embedding visualizations to %s", out_dir)
+        except Exception as e:
+            overwatch.info("Skipping embedding visualization at step %d due to %s: %s", step, type(e).__name__, e)
+
     # === VLA Training ===
 
     def run_vla_training(
@@ -339,6 +434,20 @@ class TrainingStrategy(ABC):
                     else:
                         loss = output.loss
                         logits = output.logits
+
+                if (
+                    isinstance(output, dict)
+                    and overwatch.is_rank_zero()
+                    and getattr(self, "debug_embedding_viz_interval", 0)
+                    and (metrics.global_step + 1) % self.debug_embedding_viz_interval == 0
+                ):
+                    self._save_embedding_visualizations(
+                        batch=batch,
+                        output=output,
+                        step=metrics.global_step + 1,
+                        run_dir=metrics.run_dir,
+                        max_samples=getattr(self, "debug_embedding_viz_samples", 1),
+                    )
 
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
