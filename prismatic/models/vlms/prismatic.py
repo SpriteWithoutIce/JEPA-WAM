@@ -20,12 +20,14 @@ from PIL import Image
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from prismatic.models.action_heads import ActionHead, AuxHead
 from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK, PROPRIO_DIM
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -70,8 +72,49 @@ class PrismaticVLM(VLM):
         # Trackers
         self.vision_backbone_requires_grad = False
 
+        # === Action Head & Aux Head (JEPA-VLA) ===
+        self.use_action_head = kwargs.get("use_action_head", True)
+        self.use_aux_head = kwargs.get("use_aux_head", True)
+        self.lambda_aux = kwargs.get("lambda_aux", 0.2)
+
+        if self.use_action_head:
+            self.action_head = ActionHead(
+                d_proprio=kwargs.get("d_proprio", PROPRIO_DIM),
+                d_action=kwargs.get("d_action", ACTION_DIM),
+                d_a=kwargs.get("d_a", 1024),
+                d_llm=llm_backbone.embed_dim,
+                horizon=kwargs.get("action_horizon", NUM_ACTIONS_CHUNK),
+                n_heads=kwargs.get("n_heads_action", 16),
+                num_layers=kwargs.get("num_layers_action", 16),
+                ffn_ratio=kwargs.get("ffn_ratio_action", 4),
+                beta_alpha=kwargs.get("beta_alpha", 1.5),
+                beta_beta=kwargs.get("beta_beta", 1.0),
+            )
+        else:
+            self.action_head = None
+
+        if self.use_aux_head:
+            self.aux_head = AuxHead(
+                d_llm=llm_backbone.embed_dim,
+                d_jepa=kwargs.get("d_jepa", 1024),
+                num_views_max=kwargs.get("num_views_max", 3),
+                d_aux=kwargs.get("d_aux", 768),
+                n_heads=kwargs.get("n_heads_aux", 12),
+                num_layers=kwargs.get("num_layers_aux", 12),
+                ffn_ratio=kwargs.get("ffn_ratio_aux", 4),
+                T=kwargs.get("aux_T", 4),
+                H=kwargs.get("aux_H", 14),
+                W=kwargs.get("aux_W", 14),
+            )
+        else:
+            self.aux_head = None
+
         # Set Module Keys =>> used in Checkpoint Saving / Model Loading
         self.all_module_keys = ["vision_backbone", "llm_backbone", "projector"]
+        if self.action_head is not None:
+            self.all_module_keys.append("action_head")
+        if self.aux_head is not None:
+            self.all_module_keys.append("aux_head")
         self.trainable_module_keys = []
 
         # === Generation Utilities ===
@@ -156,9 +199,17 @@ class PrismaticVLM(VLM):
             self.vision_backbone.requires_grad_(False)
             self.llm_backbone.requires_grad_(True)
             self.projector.requires_grad_(True)
+            if self.action_head is not None:
+                self.action_head.requires_grad_(True)
+            if self.aux_head is not None:
+                self.aux_head.requires_grad_(True)
 
             # Add to `self.trainable_module_keys`
             self.trainable_module_keys = ["projector", "llm_backbone"]
+            if self.action_head is not None:
+                self.trainable_module_keys.append("action_head")
+            if self.aux_head is not None:
+                self.trainable_module_keys.append("aux_head")
 
             # Update Trackers
             self.vision_backbone_requires_grad = False
@@ -167,6 +218,10 @@ class PrismaticVLM(VLM):
             overwatch.info(f"[Frozen]    🥶 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            if self.action_head is not None:
+                overwatch.info(f"[TRAINABLE] 🔥 =>> Action Head (GR00T)", ctx_level=1)
+            if self.aux_head is not None:
+                overwatch.info(f"[TRAINABLE] 🔥 =>> Aux Head", ctx_level=1)
 
         elif stage in {"full-finetune", "vla-full-train"}:
             self.vision_backbone.dtype = torch.float32
@@ -287,15 +342,21 @@ class PrismaticVLM(VLM):
         vision_fsdp_wrapping_policy = self.vision_backbone.get_fsdp_wrapping_policy()
         llm_fsdp_wrapping_policy = self.llm_backbone.get_fsdp_wrapping_policy()
 
-        # Get Prismatic Wrapping Policy =>> just a module wrapping policy around `self.projector`
+        # Get Prismatic Wrapping Policy =>> projector + action/aux heads
+        head_classes = {LinearProjector, MLPProjector, FusedMLPProjector}
+        if self.action_head is not None:
+            from prismatic.models.action_heads import ActionHeadBackbone, SelfAttnBlock, CrossAttnBlock
+            head_classes.update({ActionHeadBackbone, SelfAttnBlock, CrossAttnBlock})
+        if self.aux_head is not None:
+            from prismatic.models.action_heads import AuxDecoderBlock
+            head_classes.add(AuxDecoderBlock)
+
         prismatic_fsdp_wrapping_policy = partial(
             _module_wrap_policy,
-            module_classes={LinearProjector, MLPProjector, FusedMLPProjector},
+            module_classes=head_classes,
         )
 
         # Return union (_or_) over constituent policies
-        #   => Note: there is *not* a fall-through policy; any module that isn't covered by the above constituents will
-        #            automatically be folded into the root VLM FSDP instance.
         return partial(
             _or_policy,
             policies=[
@@ -322,12 +383,20 @@ class PrismaticVLM(VLM):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         multimodal_indices: Optional[torch.LongTensor] = None,
-    ) -> CausalLMOutputWithPast:
-        """Run a forward pass through the VLM, returning a CausalLMOutputWithPast instance (contains loss)."""
+        future_pixel_values: Optional[torch.FloatTensor] = None,
+        actions: Optional[torch.FloatTensor] = None,
+        proprio: Optional[torch.FloatTensor] = None,
+    ):
+        """Run a forward pass through the Predictor (V-JEPA + LLM).
+
+        Returns a dict with:
+            - loss: LLM causal loss (for backward compatibility)
+            - llm_hidden: last layer hidden states [B, L, D_llm]
+            - vjepa_target: future frame V-JEPA embeddings [B, V, 4, 14, 14, D_jepa] (if future_pixel_values provided)
+        """
 
         # Handle Inference (leverage cache, short-circuit on just LLM forward)
         if input_ids.shape[1] == 1 and past_key_values is not None:
-            # We're leveraging the cache, so just redirect to `self.llm_backbone` with `input_ids` and `past_key_values`
             output = self.llm_backbone(
                 input_ids=input_ids,
                 attention_mask=None,
@@ -364,14 +433,19 @@ class PrismaticVLM(VLM):
                 return_dict=return_dict,
             )
 
-        # Run Visual Feature Extraction
+        # Run Visual Feature Extraction (current frames)
         with torch.set_grad_enabled(self.vision_backbone_requires_grad):
             if isinstance(pixel_values, dict):
                 patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values})
             else:
                 patch_features = self.vision_backbone(pixel_values[multimodal_indices])
 
-        # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
+        # Encode future frames for aux target (if provided)
+        vjepa_target = None
+        if future_pixel_values is not None and hasattr(self.vision_backbone, "encode_future"):
+            vjepa_target = self.vision_backbone.encode_future(future_pixel_values[multimodal_indices])
+
+        # Projection Logic :: [bsz, num_patches, llm_embed_dim]
         projected_patch_embeddings = self.projector(patch_features)
         projected_patch_attention_mask = None
         if attention_mask is not None:
@@ -406,7 +480,6 @@ class PrismaticVLM(VLM):
             )
 
         # [Contract] We assume the first token of `labels` (associated with <BOS>) is already marked as "IGNORE"
-        #   => We'll ignore the per-token outputs for each of the patch embeddings as well!
         multimodal_labels = None
         if labels is not None:
             projected_patch_labels = torch.full(
@@ -420,25 +493,17 @@ class PrismaticVLM(VLM):
             )
 
         # === Add Unimodal Handling ===
-
-        # Create Fused Embeddings, Attention Mask, and Labels by Merging with "unimodal" Inputs (if applicable)
         unimodal_indices = torch.tensor(
             [idx for idx in range(len(input_ids)) if idx not in multimodal_indices],
             dtype=torch.long,
             device=multimodal_indices.device,
         )
 
-        # No "unimodal" data --> Fused == Multimodal
         if len(unimodal_indices) == 0:
             fused_embeddings = multimodal_embeddings
             fused_attention_mask = multimodal_attention_mask
             fused_labels = multimodal_labels
-
         else:
-            # Otherwise --> Merge w/ unimodal data
-
-            # This doesn't matter --> but in the "normal" case this is the embedding of the <PAD> token
-            #   => NOTE :: Verified that `zeros/randn/empty/<PAD> embedding` all return the same result!
             unimodal_embeddings_pad = torch.zeros(
                 (len(unimodal_indices), projected_patch_embeddings.shape[1], input_embeddings.shape[2]),
                 dtype=input_embeddings.dtype,
@@ -461,13 +526,12 @@ class PrismaticVLM(VLM):
             unimodal_attention_mask = torch.cat([attention_mask[unimodal_indices], unimodal_attention_pad], dim=1)
             unimodal_labels = torch.cat([labels[unimodal_indices], unimodal_labels_pad], dim=1)
 
-            # Create "Fused" Tensors by Stacking Multimodal & Unimodal
             fused_embeddings = torch.vstack([multimodal_embeddings, unimodal_embeddings])
             fused_attention_mask = torch.vstack([multimodal_attention_mask, unimodal_attention_mask])
             fused_labels = torch.vstack([multimodal_labels, unimodal_labels])
 
-        # Run LLM Forward --> returns CausalLMOutputWithPast!
-        return self.llm_backbone(
+        # Run LLM Forward with output_hidden_states=True
+        llm_output = self.llm_backbone(
             input_ids=None,
             attention_mask=fused_attention_mask,
             position_ids=None,
@@ -476,9 +540,57 @@ class PrismaticVLM(VLM):
             labels=fused_labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=True,
             return_dict=return_dict,
         )
+
+        # === Action Head & Aux Head Forward ===
+        llm_hidden = llm_output.hidden_states[-1] if llm_output.hidden_states is not None else None
+        total_loss = llm_output.loss if llm_output.loss is not None else torch.tensor(0.0, device=input_ids.device)
+        loss_action = None
+        loss_aux = None
+
+        if llm_hidden is not None:
+            # Determine number of views from pixel_values shape
+            if pixel_values is not None and pixel_values.dim() == 5:
+                V = pixel_values.shape[1]
+            else:
+                V = 1
+
+            z_action = llm_hidden[:, -1, :]  # [B, D_llm]
+
+            # Action Head (Flow Matching)
+            if self.action_head is not None and "actions" in kwargs and "proprio" in kwargs:
+                actions = kwargs["actions"]
+                proprio = kwargs["proprio"]
+                if actions is not None and proprio is not None:
+                    # Ensure actions has the right shape [B, H_a, D_action]
+                    if actions.dim() == 2:
+                        actions = actions.unsqueeze(1)  # [B, 1, D_action]
+                    loss_action, _ = self.action_head(z_action, proprio, actions)
+                    total_loss = total_loss + loss_action
+
+            # Aux Head (Future JEPA Embedding Prediction)
+            if self.aux_head is not None and vjepa_target is not None and self.training:
+                aux_pred = self.aux_head(llm_hidden, V=V)
+                # Per-patch layer-normalized MSE (no learnable params)
+                pred_n = F.layer_norm(aux_pred, aux_pred.shape[-1:])
+                target_n = F.layer_norm(vjepa_target, vjepa_target.shape[-1:])
+                loss_aux = F.mse_loss(pred_n, target_n)
+                total_loss = total_loss + self.lambda_aux * loss_aux
+
+        # Build Predictor output dict
+        output = {
+            "loss": total_loss,
+            "logits": llm_output.logits,
+            "llm_hidden": llm_hidden,
+            "vjepa_target": vjepa_target,
+        }
+        if loss_action is not None:
+            output["loss_action"] = loss_action
+        if loss_aux is not None:
+            output["loss_aux"] = loss_aux
+        return output
 
     # === GenerationMixin Methods ===
     #   => Note: The following methods override the functionality of `transformers.GenerationMixin`; these expect the

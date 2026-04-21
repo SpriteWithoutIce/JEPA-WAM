@@ -10,8 +10,8 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from vjepa21_standalone.masks.utils import apply_masks
-from vjepa21_standalone.utils.tensors import trunc_normal_
+from vjepa21.masks.utils import apply_masks
+from vjepa21.utils.tensors import trunc_normal_
 
 from .utils.modules import Block
 from .utils.patch_embed import PatchEmbed, PatchEmbed3D

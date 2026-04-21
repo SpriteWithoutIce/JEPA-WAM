@@ -19,6 +19,7 @@ from prismatic.models.backbones.vision import (
     ImageTransform,
     IN1KViTBackbone,
     SigLIPViTBackbone,
+    VJEPAVisionBackbone,
     VisionBackbone,
 )
 from prismatic.models.vlms import PrismaticVLM
@@ -48,6 +49,9 @@ VISION_BACKBONES = {
     # === Fused Backbones ===
     "dinoclip-vit-l-336px": {"cls": DinoCLIPViTBackbone, "kwargs": {"default_image_size": 336}},
     "dinosiglip-vit-so-384px": {"cls": DinoSigLIPViTBackbone, "kwargs": {"default_image_size": 384}},
+
+    # === V-JEPA Backbone ===
+    "vjepa-vit-l": {"cls": VJEPAVisionBackbone, "kwargs": {"default_image_size": 224, "checkpoint_path": None}},
 }
 
 
@@ -86,12 +90,16 @@ def get_vision_backbone_and_transform(
     vision_backbone_id: str,
     image_resize_strategy: str,
     image_sequence_len: int,
+    checkpoint_path: Optional[str] = None,
 ) -> Tuple[VisionBackbone, ImageTransform]:
     """Instantiate a Vision Backbone, returning both the nn.Module wrapper class and default Image Transform."""
     if vision_backbone_id in VISION_BACKBONES:
         vision_cfg = VISION_BACKBONES[vision_backbone_id]
+        kwargs = dict(vision_cfg["kwargs"])
+        if checkpoint_path is not None:
+            kwargs["checkpoint_path"] = checkpoint_path
         vision_backbone: VisionBackbone = vision_cfg["cls"](
-            vision_backbone_id, image_resize_strategy, image_sequence_len=image_sequence_len, **vision_cfg["kwargs"]
+            vision_backbone_id, image_resize_strategy, image_sequence_len=image_sequence_len, **kwargs
         )
         image_transform = vision_backbone.get_image_transform()
         return vision_backbone, image_transform
@@ -149,15 +157,19 @@ def get_llm_backbone_and_tokenizer(
     llm_max_length: int = 2048,
     hf_token: Optional[str] = None,
     inference_mode: bool = False,
+    custom_hf_path: Optional[str] = None,
 ) -> Tuple[LLMBackbone, PreTrainedTokenizerBase]:
     if llm_backbone_id in LLM_BACKBONES:
         llm_cfg = LLM_BACKBONES[llm_backbone_id]
+        kwargs = dict(llm_cfg["kwargs"])
+        if custom_hf_path is not None:
+            kwargs["custom_hf_path"] = custom_hf_path
         llm_backbone: LLMBackbone = llm_cfg["cls"](
             llm_backbone_id,
             llm_max_length=llm_max_length,
             hf_token=hf_token,
             inference_mode=inference_mode,
-            **llm_cfg["kwargs"],
+            **kwargs,
         )
         tokenizer = llm_backbone.get_tokenizer()
         return llm_backbone, tokenizer
@@ -172,6 +184,7 @@ def get_vlm(
     vision_backbone: VisionBackbone,
     llm_backbone: LLMBackbone,
     enable_mixed_precision_training: bool = True,
+    **kwargs,
 ) -> PrismaticVLM:
     """Lightweight wrapper around initializing a VLM, mostly for future-proofing (if one wants to add a new VLM)."""
     return PrismaticVLM(
@@ -180,4 +193,5 @@ def get_vlm(
         llm_backbone,
         enable_mixed_precision_training=enable_mixed_precision_training,
         arch_specifier=arch_specifier,
+        **kwargs,
     )

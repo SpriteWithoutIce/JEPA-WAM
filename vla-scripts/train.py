@@ -65,6 +65,9 @@ class TrainConfig:
     resume_step: Optional[int] = None                               # Global Step to Resume (should match checkpoint)
     resume_epoch: Optional[int] = None                              # Epoch to Resume (should match checkpoint)
 
+    # Custom Local Paths (for JEPA-VLA and local model checkpoints)
+    llm_checkpoint_path: Optional[Path] = None                      # Local path to LLM (e.g., Qwen2.5-0.5B)
+
     # Run Arguments
     run_id: Optional[str] = None                                    # Run ID for logging, Weights & Biases
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
@@ -150,7 +153,49 @@ def train(cfg: TrainConfig) -> None:
         vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True)
 
     else:
-        vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
+        # Try loading from registry; if not found (e.g., JEPA-VLA), build from scratch
+        try:
+            vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
+        except (ValueError, Exception) as e:
+            overwatch.info(f"Base VLM `{cfg.vla.base_vlm}` load failed ({type(e).__name__}); building from scratch for JEPA-VLA")
+            from prismatic.conf import ModelConfig
+            from prismatic.models.materialize import get_vision_backbone_and_transform, get_llm_backbone_and_tokenizer, get_vlm
+
+            model_cfg = ModelConfig.get_choice_class(str(cfg.vla.base_vlm))()
+            vision_backbone, image_transform = get_vision_backbone_and_transform(
+                model_cfg.vision_backbone_id,
+                model_cfg.image_resize_strategy,
+                model_cfg.image_sequence_len,
+                checkpoint_path=cfg.vla.vjepa_checkpoint_path,
+            )
+            llm_backbone, tokenizer = get_llm_backbone_and_tokenizer(
+                model_cfg.llm_backbone_id,
+                llm_max_length=model_cfg.llm_max_length,
+                hf_token=hf_token,
+                inference_mode=False,
+                custom_hf_path=str(cfg.llm_checkpoint_path) if cfg.llm_checkpoint_path else None,
+            )
+            vlm = get_vlm(
+                model_cfg.model_id,
+                model_cfg.arch_specifier,
+                vision_backbone,
+                llm_backbone,
+                enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training,
+                # Pass JEPA-VLA head hyperparameters
+                use_action_head=cfg.vla.use_action_head,
+                use_aux_head=cfg.vla.use_aux_head,
+                d_a=cfg.vla.d_a,
+                n_heads_action=cfg.vla.n_heads_action,
+                num_layers_action=cfg.vla.num_layers_action,
+                ffn_ratio_action=cfg.vla.ffn_ratio_action,
+                beta_alpha=cfg.vla.beta_alpha,
+                beta_beta=cfg.vla.beta_beta,
+                d_aux=cfg.vla.d_aux,
+                n_heads_aux=cfg.vla.n_heads_aux,
+                num_layers_aux=cfg.vla.num_layers_aux,
+                ffn_ratio_aux=cfg.vla.ffn_ratio_aux,
+                lambda_aux=cfg.vla.lambda_aux,
+            )
 
     # [Validate] Model should be in Full Precision!
     for param in vlm.parameters():
@@ -197,6 +242,7 @@ def train(cfg: TrainConfig) -> None:
         default_image_resolution=vlm.vision_backbone.default_image_resolution,
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
+        use_proprio=True,
     )
 
     # Save dataset statistics for de-normalization at inference time

@@ -52,6 +52,27 @@ class VLAConfig(ChoiceRegistry):
     image_sequence_len: int
     use_wrist_image: bool
 
+    # V-JEPA Backbone Configuration
+    vjepa_checkpoint_path: Optional[str] = None      # Path to V-JEPA 2.1 .pt checkpoint
+    future_obs_window_size: int = 0                  # Number of future frames to extract for aux target
+
+    # Action Head (GR00T Flow Matching)
+    use_action_head: bool = True
+    d_a: int = 1024                                  # Internal dim of action head
+    n_heads_action: int = 16
+    num_layers_action: int = 16
+    ffn_ratio_action: int = 4
+    beta_alpha: float = 1.5
+    beta_beta: float = 1.0
+
+    # Aux Head (Cross-Attention Decoder)
+    use_aux_head: bool = True
+    d_aux: int = 768
+    n_heads_aux: int = 12
+    num_layers_aux: int = 12
+    ffn_ratio_aux: int = 4
+    lambda_aux: float = 0.2
+
     # Enable Gradient/Activation Checkpointing (for the LLM Backbone)
     enable_gradient_checkpointing: bool = True      # Enable Gradient/Activation Checkpointing during Training
 
@@ -186,6 +207,35 @@ class Exp_Qwen25_DinoSigLIP_224px_0_5B_Bridge(Exp_SigLIP_224px_Bridge):
 
 
 @dataclass
+class Exp_JEPAVLA_Qwen25_VJEPA_0_5B_LIBERO_90(Exp_SigLIP_224px_Bridge):
+    vla_id: str = "jepavla-qwen25-vjepa-224px+0_5b+mx-libero-90"
+    base_vlm: Union[str, Path] = "prism-qwen25-vjepa-224px+0_5b"
+
+    image_sequence_len: int = 1
+    use_wrist_image: bool = False
+    freeze_vision_backbone: bool = True
+    freeze_llm_backbone: bool = False
+    unfreeze_last_llm_layer: bool = False
+
+    data_mix: str = "libero_90"
+    action_tokenizer: str = "extra_action_tokenizer"
+
+    expected_world_size: int = 8
+    global_batch_size: int = 256
+    per_device_batch_size: int = 32
+
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    lr_scheduler_type: str = "constant"
+    warmup_ratio: float = 0.0
+
+    # JEPA-specific overrides
+    future_obs_window_size: int = 8
+    vjepa_checkpoint_path: Optional[str] = None
+
+
+@dataclass
 class Exp_DinoSigLIP_224px_LIBERO_90(Exp_DinoSigLIP_224px_Bridge):
     vla_id: str = "prism-dinosiglip-224px+mx-libero-90"
 
@@ -297,6 +347,9 @@ class VLARegistry(Enum):
     QWEN25_DINOSIGLIP_224PX_WRIST_0_5B_LIBERO_90 = Exp_Qwen25_DinoSigLIP_224px_wrist_0_5B_LIBERO_90
 
     QWEN25_DINOSIGLIP_224PX_0_5B_BRIDGE = Exp_Qwen25_DinoSigLIP_224px_0_5B_Bridge
+
+    # === JEPA-VLA Configs ===
+    JEPAVLA_QWEN25_VJEPA_224PX_0_5B_LIBERO_90 = Exp_JEPAVLA_Qwen25_VJEPA_0_5B_LIBERO_90
 
     # === TDROID Fine-tuning Configs ===
     SIGLIP_224PX_MX_TDROID_CARROT_IN_BOWL = Exp_SigLIP_224px_TDROID_CarrotInBowl

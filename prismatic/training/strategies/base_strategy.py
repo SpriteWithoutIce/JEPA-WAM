@@ -299,89 +299,88 @@ class TrainingStrategy(ABC):
                 with torch.autocast(
                     "cuda", dtype=self.mixed_precision_dtype, enabled=self.enable_mixed_precision_training
                 ):
-                    # [Contract] self.vlm.forward() must automatically compute `loss` and return!
-                    output: CausalLMOutputWithPast = self.vlm(
+                    # [Contract] self.vlm.forward() now returns a dict with loss, logits, llm_hidden, vjepa_target
+                    output = self.vlm(
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         pixel_values=batch["pixel_values"],
                         labels=batch["labels"],
+                        future_pixel_values=batch.get("future_pixel_values"),
+                        actions=batch.get("actions"),
+                        proprio=batch.get("proprio"),
                     )
-                    loss = output.loss
+                    # Support both dict (new predictor) and CausalLMOutputWithPast (old VLM)
+                    if isinstance(output, dict):
+                        loss = output["loss"]
+                        logits = output.get("logits")
+                    else:
+                        loss = output.loss
+                        logits = output.logits
 
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
                 loss.backward()
 
-                # Get predicted and ground-truth token IDs
-                predicted_token_ids = output.logits[:, self.vlm.vision_backbone.num_patches : -1].argmax(dim=2)
-                ground_truth_token_ids = batch["labels"][:, 1:].to(predicted_token_ids.device)
+                # === Action / Flow Matching Metrics ===
+                # New: log action_head loss and aux_head loss if present
+                if isinstance(output, dict):
+                    if "loss_action" in output:
+                        metrics.commit(loss_action=output["loss_action"].item())
+                    if "loss_aux" in output:
+                        metrics.commit(loss_aux=output["loss_aux"].item())
 
-                #######################################################################
-                # === Compute Current Action Token Accuracy & L1 Loss ===
-                #######################################################################
+                # === Legacy Action Token Metrics (only if logits + action_tokenizer are valid) ===
+                if logits is not None and action_tokenizer is not None:
+                    predicted_token_ids = logits[:, self.vlm.vision_backbone.num_patches : -1].argmax(dim=2)
+                    ground_truth_token_ids = batch["labels"][:, 1:].to(predicted_token_ids.device)
 
-                # Get current action mask: Target the first ACTION_DIM non-ignore tokens
-                current_action_mask = get_current_action_mask(ground_truth_token_ids)
+                    # Get current action mask: Target the first ACTION_DIM non-ignore tokens
+                    current_action_mask = get_current_action_mask(ground_truth_token_ids)
+                    action_accuracy = compute_token_accuracy(predicted_token_ids, ground_truth_token_ids, mask=current_action_mask)
+                    action_l1_loss = compute_actions_l1_loss(action_tokenizer, predicted_token_ids, ground_truth_token_ids, mask=current_action_mask)
 
-                # Compute Accuracy
-                action_accuracy = compute_token_accuracy(predicted_token_ids, ground_truth_token_ids, mask=current_action_mask)
+                    # Get next actions mask
+                    next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+                    next_actions_accuracy = compute_token_accuracy(predicted_token_ids, ground_truth_token_ids, mask=next_actions_mask)
+                    next_actions_l1_loss = compute_actions_l1_loss(action_tokenizer, predicted_token_ids, ground_truth_token_ids, mask=next_actions_mask)
 
-                # Compute L1 Loss on Predicted (Continuous) Actions
-                action_l1_loss = compute_actions_l1_loss(action_tokenizer, predicted_token_ids, ground_truth_token_ids, mask=current_action_mask)
+                    metrics.commit(
+                        action_accuracy=action_accuracy,
+                        l1_loss=action_l1_loss,
+                        next_actions_accuracy=next_actions_accuracy,
+                        next_actions_l1_loss=next_actions_l1_loss,
+                        update_step_time=True,
+                    )
 
-                #######################################################################
-                # === Compute Next Actions Token Accuracy & L1 Loss ===
-                #######################################################################
-
-                # Get next actions mask: Target all tokens after the first ACTION_DIM non-ignore tokens (excluding the last token, which is the stop token)
-                next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
-
-                # Compute Accuracy
-                next_actions_accuracy = compute_token_accuracy(predicted_token_ids, ground_truth_token_ids, mask=next_actions_mask)
-
-                # Compute L1 Loss on Predicted (Continuous) Actions
-                next_actions_l1_loss = compute_actions_l1_loss(action_tokenizer, predicted_token_ids, ground_truth_token_ids, mask=next_actions_mask)
-
-                #######################################################################
-                # === Log ===
-                #######################################################################
-
-                # Commit Metrics
-                metrics.commit(
-                    action_accuracy=action_accuracy,
-                    l1_loss=action_l1_loss,
-                    next_actions_accuracy=next_actions_accuracy,
-                    next_actions_l1_loss=next_actions_l1_loss,
-                    update_step_time=True,
-                )
-
-                # Compute metrics per dataset --> only on rank_zero since we don't log them on other workers anyways
-                if overwatch.is_rank_zero():
-                    datasets = set(batch["dataset_names"])
-                    if len(datasets) > 1:
-                        for ds in datasets:
-                            ds_mask = torch.tensor([elem == ds for elem in batch["dataset_names"]])
-                            action_accuracy_ds = correct_preds[ds_mask].sum().float() / mask[ds_mask].sum().float()
-                            pred_continuous_actions_ds = torch.tensor(
-                                action_tokenizer.decode_token_ids_to_actions(
-                                    predicted_token_ids[ds_mask][mask[ds_mask]].cpu().numpy()
+                    # Compute metrics per dataset --> only on rank_zero
+                    if overwatch.is_rank_zero():
+                        datasets = set(batch["dataset_names"])
+                        if len(datasets) > 1:
+                            for ds in datasets:
+                                ds_mask = torch.tensor([elem == ds for elem in batch["dataset_names"]])
+                                action_accuracy_ds = correct_preds[ds_mask].sum().float() / mask[ds_mask].sum().float()
+                                pred_continuous_actions_ds = torch.tensor(
+                                    action_tokenizer.decode_token_ids_to_actions(
+                                        predicted_token_ids[ds_mask][mask[ds_mask]].cpu().numpy()
+                                    )
                                 )
-                            )
-                            continuous_actions_gt_ds = torch.tensor(
-                                action_tokenizer.decode_token_ids_to_actions(
-                                    ground_truth_token_ids[ds_mask][mask[ds_mask]].cpu().numpy()
+                                continuous_actions_gt_ds = torch.tensor(
+                                    action_tokenizer.decode_token_ids_to_actions(
+                                        ground_truth_token_ids[ds_mask][mask[ds_mask]].cpu().numpy()
+                                    )
                                 )
-                            )
-                            action_l1_loss_ds = torch.nn.functional.l1_loss(
-                                pred_continuous_actions_ds, continuous_actions_gt_ds
-                            )
-                            metrics.commit_for_dataset(
-                                dataset_name=ds.decode(),
-                                action_accuracy=action_accuracy_ds,
-                                l1_loss=action_l1_loss_ds,
-                                next_actions_accuracy=next_actions_accuracy,
-                                next_actions_l1_loss=next_actions_l1_loss,
-                            )
+                                action_l1_loss_ds = torch.nn.functional.l1_loss(
+                                    pred_continuous_actions_ds, continuous_actions_gt_ds
+                                )
+                                metrics.commit_for_dataset(
+                                    dataset_name=ds.decode(),
+                                    action_accuracy=action_accuracy_ds,
+                                    l1_loss=action_l1_loss_ds,
+                                    next_actions_accuracy=next_actions_accuracy,
+                                    next_actions_l1_loss=next_actions_l1_loss,
+                                )
+                else:
+                    metrics.commit(update_step_time=True)
 
                 # === Gradient Step ===
 

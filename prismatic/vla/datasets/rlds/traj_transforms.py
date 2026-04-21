@@ -11,23 +11,42 @@ from typing import Dict
 import tensorflow as tf
 
 
-def chunk_act_obs(traj: Dict, window_size: int, future_action_window_size: int = 0) -> Dict:
+def chunk_act_obs(traj: Dict, window_size: int, future_action_window_size: int = 0, future_obs_window_size: int = 0) -> Dict:
     """
     Chunks actions and observations into the given window_size.
 
-    "observation" keys are given a new axis (at index 1) of size `window_size` containing `window_size - 1`
-    observations from the past and the current observation. "action" is given a new axis (at index 1) of size
-    `window_size + future_action_window_size` containing `window_size - 1` actions from the past, the current
-    action, and `future_action_window_size` actions from the future. "pad_mask" is added to "observation" and
-    indicates whether an observation should be considered padding (i.e. if it had come from a timestep
-    before the start of the trajectory).
+    "observation" keys are given a new axis (at index 1). If future_obs_window_size > 0,
+    observation takes [current, future_1, ..., future_N] instead of [past, current].
+    "action" is given a new axis (at index 1) of size `window_size + future_action_window_size`
+    containing `window_size - 1` actions from the past, the current action, and
+    `future_action_window_size` actions from the future. "pad_mask" is added to "observation".
     """
     traj_len = tf.shape(traj["action"])[0]
     action_dim = traj["action"].shape[-1]
-    effective_traj_len = traj_len - future_action_window_size
-    chunk_indices = tf.broadcast_to(tf.range(-window_size + 1, 1), [effective_traj_len, window_size]) + tf.broadcast_to(
-        tf.range(effective_traj_len)[:, None], [effective_traj_len, window_size]
-    )
+
+    # Extend effective trajectory length if we need more future observations than actions
+    max_future = tf.maximum(future_action_window_size, future_obs_window_size)
+    effective_traj_len = traj_len - max_future
+
+    # Observation chunk indices
+    if future_obs_window_size > 0:
+        # Take [current, future_1, ..., future_N] => indices [0, 1, ..., future_obs_window_size]
+        chunk_indices = tf.broadcast_to(
+            tf.range(0, 1 + future_obs_window_size),
+            [effective_traj_len, 1 + future_obs_window_size],
+        ) + tf.broadcast_to(
+            tf.range(effective_traj_len)[:, None],
+            [effective_traj_len, 1 + future_obs_window_size],
+        )
+    else:
+        # Original logic: past observations + current observation
+        chunk_indices = tf.broadcast_to(
+            tf.range(-window_size + 1, 1),
+            [effective_traj_len, window_size],
+        ) + tf.broadcast_to(
+            tf.range(effective_traj_len)[:, None],
+            [effective_traj_len, window_size],
+        )
 
     action_chunk_indices = tf.broadcast_to(
         tf.range(-window_size + 1, 1 + future_action_window_size),
@@ -37,17 +56,22 @@ def chunk_act_obs(traj: Dict, window_size: int, future_action_window_size: int =
         [effective_traj_len, window_size + future_action_window_size],
     )
 
-    floored_chunk_indices = tf.maximum(chunk_indices, 0)
+    # Clamp observation indices to valid range [0, traj_len - 1]
+    floored_chunk_indices = tf.minimum(tf.maximum(chunk_indices, 0), traj_len - 1)
 
     goal_timestep = tf.fill([effective_traj_len], traj_len - 1)
-
     floored_action_chunk_indices = tf.minimum(tf.maximum(action_chunk_indices, 0), goal_timestep[:, None])
 
     traj["observation"] = tf.nest.map_structure(lambda x: tf.gather(x, floored_chunk_indices), traj["observation"])
     traj["action"] = tf.gather(traj["action"], floored_action_chunk_indices)
 
-    # indicates whether an entire observation is padding
-    traj["observation"]["pad_mask"] = chunk_indices >= 0
+    # Pad mask: for future_obs mode, all frames are valid; otherwise use original logic
+    if future_obs_window_size > 0:
+        traj["observation"]["pad_mask"] = tf.ones(
+            [effective_traj_len, 1 + future_obs_window_size], dtype=tf.bool
+        )
+    else:
+        traj["observation"]["pad_mask"] = chunk_indices >= 0
 
     # Truncate other elements of the trajectory dict
     traj["task"] = tf.nest.map_structure(lambda x: tf.gather(x, tf.range(effective_traj_len)), traj["task"])

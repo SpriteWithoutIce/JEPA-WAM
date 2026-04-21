@@ -1,410 +1,376 @@
 """
 action_heads.py
 
-Implementations of various action heads, which serve as alternatives to VLM sequential token prediction.
+Action Head (GR00T-style Flow Matching) and Auxiliary Head (Cross-Attention Decoder)
+for JEPA-VLA.
 """
 
-import math
+from typing import Optional
+
 import torch
 import torch.nn as nn
-from prismatic.vla.constants import ACTION_DIM, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX, NUM_ACTIONS_CHUNK, PROPRIO_DIM, STOP_INDEX, NUM_TOKENS
+import torch.nn.functional as F
 
 
-
-def learnable_random_perturbations(seq_len, dim, device, dtype):
-    random_perturbations = nn.Parameter(torch.zeros(seq_len, dim, device=device, dtype=dtype))
-    nn.init.normal_(random_perturbations, mean=0.0, std=0.02)
-    return random_perturbations
+# =============================================================================
+# Action Head: GR00T-style Flow Matching
+# =============================================================================
 
 
+class StateEncoder(nn.Module):
+    """Encode proprioceptive state into a single token."""
 
-class L1RegressionActionHead(nn.Module):
-    """Simple MLP-based action head that generates continuous actions via L1 regression."""
-    def __init__(
-        self,
-        input_dim=4096,
-        hidden_dim=4096,
-        action_dim=7,
-        num_task_tokens=512,
-        use_pro_version=False,
-    ):
+    def __init__(self, d_proprio: int, d_a: int):
         super().__init__()
-        self.num_task_tokens = num_task_tokens
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
-        self.model = MLPResNet(
-            num_blocks=24, 
-            input_dim=input_dim*ACTION_DIM, 
-            hidden_dim=hidden_dim, 
-            output_dim=action_dim,
-            use_pro_version=use_pro_version
-            )
-
-    def predict_action(
-            self, 
-            actions_hidden_states, 
-            proprio=None, 
-            proprio_projector=None,
-            phase="Inference"
-            ):
-        batch_size = actions_hidden_states.shape[0]
-        device = actions_hidden_states.device
-
-        proprio = proprio.reshape(batch_size, -1).to(torch.bfloat16)  # (bsz, proprio_dim)
-        proprio_features = proprio_projector(proprio)  # (bsz, llm_dim)
-        proprio_features = proprio_features.unsqueeze(dim=1)  # (bsz, 1, llm_dim)
-
-        task_hidden_states = actions_hidden_states[:, :, :self.num_task_tokens, :]
-        actions_hidden_states = actions_hidden_states[:, :, self.num_task_tokens:, :]
-
-        cond_actions_hidden_states = torch.zeros(
-            (batch_size, self.action_dim * NUM_ACTIONS_CHUNK, self.hidden_dim),
-            device=device, dtype=actions_hidden_states.dtype
-        ).detach()  
-
-        rearranged_actions_hidden_states = cond_actions_hidden_states.reshape(
-            batch_size, NUM_ACTIONS_CHUNK, -1
-        )  # (batch, chunk_len, action_dim * hidden_dim)
-
-        if phase == "Training":
-            batch_size, seq_len, dim = rearranged_actions_hidden_states.shape
-            random_perturbations = learnable_random_perturbations(seq_len, dim, device=rearranged_actions_hidden_states.device, dtype=rearranged_actions_hidden_states.dtype) 
-            rearranged_actions_hidden_states = (rearranged_actions_hidden_states + random_perturbations) # (1, seq_len, dim)
-
-        action = self.model(
-            rearranged_actions_hidden_states,
-            h_a=actions_hidden_states,
-            p=proprio_features,
-            h_t=task_hidden_states
-            )
-
-        return action
-    
-
-class MLPResNet(nn.Module):
-    """MLP with residual connection blocks."""
-    def __init__(
-            self, 
-            num_blocks, 
-            input_dim, 
-            hidden_dim, 
-            output_dim,
-            use_pro_version=False
-            ):
-        
-        super().__init__()
-        self.layer_norm1 = nn.LayerNorm(input_dim)
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.mlp_resnet_blocks = nn.ModuleList()
-
-        for _ in range(num_blocks):
-            if use_pro_version:
-                self.mlp_resnet_blocks.append(MLPResNetBlock_Pro(dim=hidden_dim))
-            else:
-                self.mlp_resnet_blocks.append(MLPResNetBlock(dim=hidden_dim))
-                
-        self.layer_norm2 = nn.LayerNorm(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-
-
-    def forward(self, x, h_a=None, h_t=None, p= None):
- 
-        # x: (batch_size, input_dim)
-        x = self.layer_norm1(x)  # shape: (batch_size, input_dim)
-        x = self.fc1(x)  # shape: (batch_size, hidden_dim)
-        x = self.relu(x)  # shape: (batch_size, hidden_dim)
-        for i, block in enumerate(self.mlp_resnet_blocks):
-            x = block(x, h_t = h_t[:,i+1,:], h_a = h_a[:,i+1,:], p=p)  # shape: (batch_size, hidden_dim)
-        x = self.layer_norm2(x)  # shape: (batch_size, hidden_dim)
-        x = self.fc2(x)  # shape: (batch_size, output_dim)
-        return x   
-
-
-
-def apply_rope(q, k, cos, sin):
-    """
-    RoPE:
-    q, k: (B, H, T, D)   # D must be an even number
-    cos/sin: (T, D)
-    """
-    cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, T, D)
-    sin = sin.unsqueeze(0).unsqueeze(0)
-
-
-    def rotate_half(x):
-        # Swap even and odd dimensions and flip the signs
-        x1 = x[..., ::2]   # Even subdimension
-        x2 = x[..., 1::2]  # odd subdimension
-
-        return torch.stack((-x2, x1), dim=-1).reshape_as(x)
-
-
-    q_rot = (q * cos) + (rotate_half(q) * sin)
-    k_rot = (k * cos) + (rotate_half(k) * sin)
-
-    return q_rot, k_rot
-
-
-
-class RotaryPositionEmbedding(nn.Module):
-    def __init__(self, dim, base=10000):
-        """
-        dim = head_dim
-        """
-        super().__init__()
-        assert dim % 2 == 0, "RoPE head_dim must be an even number"
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def forward(self, seq_len, device, dtype):
-        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # (T, dim/2)
-        emb = torch.cat([freqs, freqs], dim=-1)            # (T, dim)
-        return emb.cos().to(dtype), emb.sin().to(dtype)
-
-
-
-class MLPResNetBlock(nn.Module):
-    """
-    One residual MLP block with cross-attention conditioning.
-
-    This block applies multi-head attention over:
-      - token features (self-attention),
-      - task-related hidden states (h_t),
-      - action/proprioception-related hidden states (h_a, p).
-    The outputs are combined via a gating mechanism, projected back to the
-    hidden dimension, and passed through a small feedforward sub-network with
-    residual connection.
-
-    Args:
-        dim (int): Dimensionality of the hidden features. Must be divisible by num_heads.
-
-    Inputs:
-        x (torch.Tensor): Input tensor of shape (batch_size, seq_len, hidden_dim).
-        h_t (torch.Tensor, optional): Task-related hidden states of shape
-                                      (batch_size, K, hidden_dim).
-        h_a (torch.Tensor, optional): Action-related hidden states of shape
-                                      (batch_size, 1, hidden_dim).
-        p (torch.Tensor, optional): Additional conditioning features
-                                    (e.g., proprioception), shape (batch_size, 1, hidden_dim).
-
-    Returns:
-        torch.Tensor: Output tensor of shape (batch_size, seq_len, hidden_dim).
-    """
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-        
-        # Main feedforward network
-        self.ffn = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
+        self.encoder = nn.Sequential(
+            nn.Linear(d_proprio, d_a),
+            nn.SiLU(),
+            nn.Linear(d_a, d_a),
         )
 
-        self.num_heads = 8
-        self.head_dim = dim // self.num_heads
-
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
-        self.o_proj = nn.Linear(dim, dim)
-
-        self.gating_factor = nn.Parameter(torch.zeros(1))
+    def forward(self, proprio: torch.Tensor) -> torch.Tensor:
+        # proprio: [B, D_proprio]
+        x = self.encoder(proprio)  # [B, D_a]
+        return x.unsqueeze(1)  # [B, 1, D_a]
 
 
+class NoisyActionEmbed(nn.Module):
+    """Embed noisy actions with time-step conditioning and positional embeddings."""
 
-    def forward(self, x, h_t=None, h_a=None, p=None):
-        """
-        x: (batch_size, seq_len, hidden_dim)
-        h, t, p: (batch_size, 1, hidden_dim) or None
-        """
-
-        g = self.gating_factor
-        ratio_g = nn.Tanh()(g)
-
-        conditions = []
-        if h_a is not None:
-            conditions.append(h_a)
-        if p is not None:
-            conditions.append(p)
-
-        h = torch.cat(conditions, dim=1)  # (batch_size, cond_len, hidden_dim)
-
-        B = x.size(0)
-        T = x.size(1)
-        C = x.size(2)
-        K_t = h.size(1)
-        K = h_t.size(1)
-
-        task_k = h
-        task_v = h
-
-        adapter_k = h_t
-        adapter_v = h_t
-
-        q_1 = self.q_proj(x) # (B, T, C)
-        k_tokens = self.k_proj(x)             # (B, T, C)
-        v_tokens = self.v_proj(x)             # (B, T, C)
-        k_task = self.k_proj(task_k)    # (B, K, C)
-        v_task = self.v_proj(task_v)    # (B, K, C)
-
-        k_adapter = self.k_proj(adapter_k)    # (B, K, C)
-        v_adapter = self.v_proj(adapter_v)    # (B, K, C)
-
-        # (B, seq_len, C) -> (B, num_heads, seq_len, head_dim)
-        q_1 = q_1.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        k_tokens = k_tokens.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        v_tokens = v_tokens.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        k_task = k_task.view(B, K_t, self.num_heads, self.head_dim).transpose(1, 2)
-        v_task = v_task.view(B, K_t, self.num_heads, self.head_dim).transpose(1, 2)
-
-        k_adapter = k_adapter.view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
-        v_adapter = v_adapter.view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
-
-        attn_scores_tokens = torch.matmul(q_1, k_tokens.transpose(-2, -1)) # (B, H, T, T)
-        attn_scores_task = torch.matmul(q_1, k_task.transpose(-2, -1)) * 1 # (B, H, T, K)
-        attn_scores_adapter = torch.matmul(q_1, k_adapter.transpose(-2, -1)) * ratio_g # (B, H, T, K)
-
-        attn_scores = torch.cat([attn_scores_tokens, attn_scores_task, attn_scores_adapter], dim=-1) # (B, H, T, T+K)
-        attn_scores = attn_scores / math.sqrt(self.head_dim)
-        attn_weights = torch.softmax(attn_scores, dim=-1) # (B, H, T, T+K)
-
-        v_combined = torch.cat([v_tokens, v_task, v_adapter], dim=2) # (B, H, T+K, head_dim)
-        output = torch.matmul(attn_weights, v_combined) # (B, H, T, head_dim)
-
-        output = output.transpose(1, 2).contiguous().view(B, T, C)
-        output = self.o_proj(output)
-
-        x = self.ffn(output + x) 
-
-        return x
-
-
-
-class MLPResNetBlock_Pro(nn.Module):
-    """One MLP ResNet block with separate projections for self, adapter, task + RoPE, now with FiLM modulation."""
-
-    def __init__(self, dim, num_heads=8):
+    def __init__(self, d_action: int, d_a: int, horizon: int):
         super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        self.action_proj = nn.Linear(d_action, d_a)
+        self.time_mlp = nn.Sequential(
+            nn.Linear(1, d_a),
+            nn.SiLU(),
+            nn.Linear(d_a, d_a),
+        )
+        self.pos_embed = nn.Parameter(torch.randn(horizon, d_a) * 0.02)
 
+    def forward(self, action_noisy: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # action_noisy: [B, H_a, D_action]
+        # t: [B]
+        x = self.action_proj(action_noisy)  # [B, H_a, D_a]
+        t_emb = self.time_mlp(t.unsqueeze(-1))  # [B, D_a]
+        x = x + t_emb.unsqueeze(1)  # broadcast time
+        x = x + self.pos_embed.unsqueeze(0)  # broadcast position
+        return x  # [B, H_a, D_a]
+
+
+class SelfAttnBlock(nn.Module):
+    def __init__(self, d_a: int, n_heads: int, ffn_ratio: int = 4):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_a)
+        self.attn = nn.MultiheadAttention(d_a, n_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_a)
         self.ffn = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-            )
+            nn.Linear(d_a, d_a * ffn_ratio),
+            nn.GELU(),
+            nn.Linear(d_a * ffn_ratio, d_a),
+        )
 
-        # Q (from x only)
-        self.q_proj = nn.Linear(dim, dim)
-
-        # Self-Attention: K, V
-        self.k_self = nn.Linear(dim, dim)
-        self.v_self = nn.Linear(dim, dim)
-
-        # Adapter cross-attention: K, V
-        self.k_adapter = nn.Linear(dim, dim)
-        self.v_adapter = nn.Linear(dim, dim)
-
-        # Task cross-attention: K, V
-        self.k_task = nn.Linear(dim, dim)
-        self.v_task = nn.Linear(dim, dim)
-
-        self.o_proj = nn.Linear(dim, dim)
-
-        # gating
-        self.gating_factor = nn.Parameter(torch.zeros(1))
-
-        # RoPE
-        self.rope = RotaryPositionEmbedding(self.head_dim)
-
-        # ---- FiLM ----
-        # FiLM is useless; to avoid conflict with chkpt, it can be kept as is for now.
-        self.film_gen = nn.Sequential(
-            nn.Linear(dim, dim * 2),  # output γ and β
-            )
-
-
-    def apply_film(self, x, gamma, beta):
-        """FiLM: per-channel modulation"""
-        return gamma.unsqueeze(1) * x + beta.unsqueeze(1)
-
-
-    def forward(self, x, h_a=None, h_t=None, p=None):
-        """
-        h_a: adapter tokens
-        h_t: task tokens
-        p:   possible conditioning vector (for FiLM)
-        """
-        g = self.gating_factor
-        ratio_g = torch.tanh(g)
-
-        # concat h_a and p
-        h_adapter = torch.cat((h_a, p),dim=1)
-
-        h_task = h_t
-        B, T, C = x.shape
-        K_a = h_adapter.size(1) if h_a is not None else 0
-        K_t = h_task.size(1) if h_task is not None else 0
-
-        # Q
-        q_1 = self.q_proj(x)
-
-        # self tokens
-        k_tokens = self.k_self(x)
-        v_tokens = self.v_self(x)
-
-        # adapter tokens
-        k_adapter = self.k_adapter(h_adapter)
-        v_adapter = self.v_adapter(h_adapter)
-
-        # task tokens
-        k_task = self.k_task(h_task)
-        v_task = self.v_task(h_task)
-
-
-        # reshape -> multi-head
-        def reshape_heads(t, B, L):
-            return t.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-
-
-        q_1 = reshape_heads(q_1, B, T)
-        k_tokens, v_tokens = reshape_heads(k_tokens, B, T), reshape_heads(v_tokens, B, T)
-        k_adapter, v_adapter = reshape_heads(k_adapter, B, K_a), reshape_heads(v_adapter, B, K_a)
-        k_task, v_task = reshape_heads(k_task, B, K_t), reshape_heads(v_task, B, K_t)
-
-        # RoPE
-        cos_main, sin_main = self.rope(seq_len=T, device=x.device, dtype=x.dtype)
-        q_1, k_tokens = apply_rope(q_1, k_tokens, cos_main, sin_main)
-        cos_a, sin_a = self.rope(seq_len=K_a, device=x.device, dtype=x.dtype)
-        _, k_adapter = apply_rope(k_adapter, k_adapter, cos_a, sin_a)     
-        cos_t, sin_t = self.rope(seq_len=K_t, device=x.device, dtype=x.dtype)
-        _, k_task = apply_rope(k_task, k_task, cos_t, sin_t)
-
-        # attention scores
-        attn_scores = [torch.matmul(q_1, k_tokens.transpose(-2, -1))]
-        attn_scores.append(torch.matmul(q_1, k_adapter.transpose(-2, -1)))
-        attn_scores.append(torch.matmul(q_1, k_task.transpose(-2, -1)) * ratio_g)
-        attn_scores = torch.cat(attn_scores, dim=-1) / math.sqrt(self.head_dim)
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-
-        # combine V
-        v_list = [v_tokens,v_adapter,v_task]
-        v_combined = torch.cat(v_list, dim=2)
-
-        output = torch.matmul(attn_weights, v_combined)
-        output = output.transpose(1, 2).contiguous().view(B, T, C)
-        output = self.o_proj(output)
-
-        # # ---- FiLM ---- 
-        # gamma_beta = self.film_gen(p)  # [B, 2C]
-        # gamma, beta = gamma_beta.chunk(2, dim=-1)  # [B, C], [B, C]
-        # output = self.apply_film(output, gamma, beta)
-
-        # residual + FFN
-        x = self.ffn(output + x)
+    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+        h = self.norm1(x)
+        h, _ = self.attn(h, h, h)
+        x = x + h
+        h = self.norm2(x)
+        x = x + self.ffn(h)
         return x
+
+
+class CrossAttnBlock(nn.Module):
+    def __init__(self, d_a: int, d_llm: int, n_heads: int, ffn_ratio: int = 4):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_a)
+        self.cond_proj = nn.Linear(d_llm, d_a)
+        self.attn = nn.MultiheadAttention(d_a, n_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_a)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_a, d_a * ffn_ratio),
+            nn.GELU(),
+            nn.Linear(d_a * ffn_ratio, d_a),
+        )
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        # cond: [B, D_llm]
+        h = self.norm1(x)
+        k_v = self.cond_proj(cond).unsqueeze(1)  # [B, 1, D_a]
+        h, _ = self.attn(h, k_v, k_v)  # cross-attn
+        x = x + h
+        h = self.norm2(x)
+        x = x + self.ffn(h)
+        return x
+
+
+class ActionHeadBackbone(nn.Module):
+    def __init__(self, d_a: int = 1024, d_llm: int = 896, n_heads: int = 16, num_layers: int = 16, ffn_ratio: int = 4):
+        super().__init__()
+        blocks = []
+        for i in range(num_layers):
+            if i % 2 == 0:  # 0, 2, 4, ... (human-indexed odd layers)
+                blocks.append(SelfAttnBlock(d_a, n_heads, ffn_ratio))
+            else:  # 1, 3, 5, ... (human-indexed even layers)
+                blocks.append(CrossAttnBlock(d_a, d_llm, n_heads, ffn_ratio))
+        self.blocks = nn.ModuleList(blocks)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x, cond)
+        return x
+
+
+class ActionOutputHead(nn.Module):
+    def __init__(self, d_a: int, d_action: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_a)
+        self.proj = nn.Linear(d_a, d_action)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, 1 + H_a, D_a]
+        x = x[:, 1:, :]  # drop state token
+        x = self.norm(x)
+        return self.proj(x)  # [B, H_a, D_action]
+
+
+class ActionHead(nn.Module):
+    """
+    GR00T-style Flow Matching Action Head.
+
+    Args:
+        d_proprio: Dimensionality of proprioceptive input.
+        d_action: Dimensionality of action output.
+        d_a: Internal dimension of the action head.
+        d_llm: Dimensionality of LLM hidden states (for cross-attention conditioning).
+        horizon: Number of action steps to predict.
+        n_heads: Number of attention heads.
+        num_layers: Number of transformer layers (alternating self/cross-attention).
+        ffn_ratio: Expansion ratio for FFN hidden dim.
+        beta_alpha, beta_beta: Beta distribution parameters for flow-matching time sampling.
+    """
+
+    def __init__(
+        self,
+        d_proprio: int,
+        d_action: int,
+        d_a: int = 1024,
+        d_llm: int = 896,
+        horizon: int = 8,
+        n_heads: int = 16,
+        num_layers: int = 16,
+        ffn_ratio: int = 4,
+        beta_alpha: float = 1.5,
+        beta_beta: float = 1.0,
+    ):
+        super().__init__()
+        self.state_enc = StateEncoder(d_proprio, d_a)
+        self.noisy_emb = NoisyActionEmbed(d_action, d_a, horizon)
+        self.backbone = ActionHeadBackbone(d_a, d_llm, n_heads, num_layers, ffn_ratio)
+        self.out_head = ActionOutputHead(d_a, d_action)
+        self.beta_alpha = beta_alpha
+        self.beta_beta = beta_beta
+        self.horizon = horizon
+        self.d_action = d_action
+
+    def forward(
+        self,
+        z_action: torch.Tensor,
+        proprio: torch.Tensor,
+        action_gt: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Training forward.
+
+        Args:
+            z_action: [B, D_llm]  LLM last hidden state.
+            proprio:  [B, D_proprio]
+            action_gt: [B, H_a, D_action]
+
+        Returns:
+            loss, v_pred
+        """
+        B = proprio.shape[0]
+        device = proprio.device
+
+        # Sample flow-matching time step
+        t = torch.distributions.Beta(self.beta_alpha, self.beta_beta).sample((B,)).to(device)
+
+        # Interpolate between noise and ground-truth action
+        noise = torch.randn_like(action_gt)
+        action_noisy = (1 - t[:, None, None]) * noise + t[:, None, None] * action_gt
+        velocity_gt = action_gt - noise
+
+        # Tokenize
+        state_tok = self.state_enc(proprio)  # [B, 1, D_a]
+        act_tok = self.noisy_emb(action_noisy, t)  # [B, H_a, D_a]
+        x = torch.cat([state_tok, act_tok], dim=1)  # [B, 1 + H_a, D_a]
+
+        # Backbone
+        x = self.backbone(x, cond=z_action)  # [B, 1 + H_a, D_a]
+
+        # Output
+        v_pred = self.out_head(x)  # [B, H_a, D_action]
+
+        # Flow-matching loss
+        loss = F.mse_loss(v_pred, velocity_gt)
+        return loss, v_pred
+
+    @torch.no_grad()
+    def sample_action(
+        self,
+        z_action: torch.Tensor,
+        proprio: torch.Tensor,
+        num_steps: int = 10,
+    ) -> torch.Tensor:
+        """
+        Inference: Euler integration from pure noise to action.
+
+        Args:
+            z_action: [B, D_llm]
+            proprio:  [B, D_proprio]
+            num_steps: Number of integration steps.
+
+        Returns:
+            action: [B, H_a, D_action]
+        """
+        B = proprio.shape[0]
+        device = proprio.device
+        H_a, D_action = self.horizon, self.d_action
+
+        x = torch.randn(B, H_a, D_action, device=device)
+        dt = 1.0 / num_steps
+
+        for step in range(num_steps):
+            t = torch.full((B,), step * dt, device=device)
+            state_tok = self.state_enc(proprio)
+            act_tok = self.noisy_emb(x, t)
+            tokens = torch.cat([state_tok, act_tok], dim=1)
+            tokens = self.backbone(tokens, cond=z_action)
+            v_pred = self.out_head(tokens)
+            x = x + v_pred * dt
+
+        return x
+
+
+# =============================================================================
+# Auxiliary Head: Cross-Attention Decoder for Future JEPA Embedding Prediction
+# =============================================================================
+
+
+class AuxQueries(nn.Module):
+    """Learnable queries constructed from view + time + spatial position embeddings."""
+
+    def __init__(self, num_views_max: int = 3, T: int = 4, H: int = 14, W: int = 14, d: int = 768):
+        super().__init__()
+        self.view_pe = nn.Parameter(torch.randn(num_views_max, d) * 0.02)
+        self.time_pe = nn.Parameter(torch.randn(T, d) * 0.02)
+        self.spatial_pe = nn.Parameter(torch.randn(H, W, d) * 0.02)
+        self.T, self.H, self.W = T, H, W
+
+    def forward(self, B: int, V: int) -> torch.Tensor:
+        v = self.view_pe[:V][:, None, None, None, :]  # [V, 1, 1, 1, d]
+        t = self.time_pe[None, :, None, None, :]  # [1, T, 1, 1, d]
+        s = self.spatial_pe[None, None, :, :, :]  # [1, 1, H, W, d]
+        q = v + t + s  # [V, T, H, W, d]
+        q = q.reshape(1, V * self.T * self.H * self.W, -1)
+        q = q.expand(B, -1, -1).contiguous()  # [B, N_q, d]
+        return q
+
+
+class AuxDecoderBlock(nn.Module):
+    """Standard pre-norm transformer decoder block: CrossAttn -> SelfAttn -> FFN."""
+
+    def __init__(self, d: int, n_heads: int, ffn_ratio: int = 4):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d)
+        self.cross_attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(d)
+        self.self_attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.norm3 = nn.LayerNorm(d)
+        self.ffn = nn.Sequential(
+            nn.Linear(d, d * ffn_ratio),
+            nn.GELU(),
+            nn.Linear(d * ffn_ratio, d),
+        )
+
+    def forward(self, queries: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        # Cross-attention: query -> memory
+        h = self.norm1(queries)
+        h, _ = self.cross_attn(h, memory, memory)
+        queries = queries + h
+
+        # Self-attention: query <-> query
+        h = self.norm2(queries)
+        h, _ = self.self_attn(h, h, h)
+        queries = queries + h
+
+        # FFN
+        h = self.norm3(queries)
+        queries = queries + self.ffn(h)
+        return queries
+
+
+class AuxHead(nn.Module):
+    """
+    Auxiliary head that predicts future V-JEPA embeddings from LLM hidden states.
+
+    Args:
+        d_llm: Dimensionality of LLM hidden states.
+        d_jepa: Dimensionality of V-JEPA encoder output (target dimension).
+        num_views_max: Maximum number of camera views (for PE reservation).
+        d_aux: Internal dimension of the decoder.
+        n_heads: Number of attention heads.
+        num_layers: Number of decoder layers.
+        ffn_ratio: Expansion ratio for FFN.
+        T, H, W: Temporal and spatial grid sizes for target embedding.
+    """
+
+    def __init__(
+        self,
+        d_llm: int,
+        d_jepa: int,
+        num_views_max: int = 3,
+        d_aux: int = 768,
+        n_heads: int = 12,
+        num_layers: int = 12,
+        ffn_ratio: int = 4,
+        T: int = 4,
+        H: int = 14,
+        W: int = 14,
+    ):
+        super().__init__()
+        self.queries = AuxQueries(num_views_max, T, H, W, d_aux)
+        self.query_proj = nn.Linear(d_aux, d_aux)
+        self.memory_proj = nn.Linear(d_llm, d_aux)
+
+        self.blocks = nn.ModuleList([
+            AuxDecoderBlock(d_aux, n_heads, ffn_ratio)
+            for _ in range(num_layers)
+        ])
+
+        self.final_norm = nn.LayerNorm(d_aux)
+        self.output_proj = nn.Linear(d_aux, d_jepa)
+
+        self.T, self.H, self.W = T, H, W
+
+    def forward(self, llm_hidden: torch.Tensor, V: int) -> torch.Tensor:
+        """
+        Args:
+            llm_hidden: [B, L, D_llm]
+            V: Number of views in the current batch.
+
+        Returns:
+            out: [B, V, T, H, W, D_jepa]
+        """
+        B = llm_hidden.shape[0]
+
+        queries = self.queries(B, V)  # [B, N_q, d_aux]
+        queries = self.query_proj(queries)
+        memory = self.memory_proj(llm_hidden)  # [B, L, d_aux]
+
+        for block in self.blocks:
+            queries = block(queries, memory)
+
+        queries = self.final_norm(queries)
+        out = self.output_proj(queries)  # [B, N_q, D_jepa]
+        out = out.reshape(B, V, self.T, self.H, self.W, -1)
+        return out

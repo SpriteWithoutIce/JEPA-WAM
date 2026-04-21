@@ -39,9 +39,14 @@ class RLDSBatchTransform:
 
 
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
-        """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
+        """Converts a RLDS batch to the format expected by the JEPA-WAM collator/models."""
         dataset_name, current_action = rlds_batch["dataset_name"], rlds_batch["action"][0]
-        img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+        
+        # Observation now contains [current_frame, future_frame_1, ..., future_frame_8]
+        obs = rlds_batch["observation"]
+        img = Image.fromarray(obs["image_primary"][0])
+        future_imgs = [Image.fromarray(obs["image_primary"][i]) for i in range(1, len(obs["image_primary"]))]
+        
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
         actions = rlds_batch["action"]
 
@@ -119,13 +124,21 @@ class RLDSBatchTransform:
         #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
         input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
         pixel_values = self.image_transform(img)
+        future_pixel_values = torch.stack([self.image_transform(fimg) for fimg in future_imgs])
 
         # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
         labels[: -(action_chunk_len + 1)] = IGNORE_INDEX
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
 
-        return_dict = dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name, actions=actions)
+        return_dict = dict(
+            pixel_values=pixel_values,
+            future_pixel_values=future_pixel_values,
+            input_ids=input_ids,
+            labels=labels,
+            dataset_name=dataset_name,
+            actions=actions,
+        )
 
         # Add additional inputs
         if self.use_wrist_image:
@@ -184,6 +197,7 @@ class RLDSDataset(IterableDataset):
             traj_transform_kwargs=dict(
                 window_size=1,                                      # If we wanted to feed / predict more than one step
                 future_action_window_size=NUM_ACTIONS_CHUNK-1,      # For action chunking
+                future_obs_window_size=8,                           # For JEPA future frame prediction (current + 8 future)
                 skip_unlabeled=True,                                # Skip trajectories without language labels
                 goal_relabeling_strategy="uniform",                 # Goals are currently unused
             ),

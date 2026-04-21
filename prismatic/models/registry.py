@@ -710,6 +710,7 @@ MODEL_REGISTRY = {
             "train_epochs": 1,
         }
     },
+
 }
 
 # Build Global Registry (Model ID, Name) -> Metadata

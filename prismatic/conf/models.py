@@ -523,6 +523,18 @@ class Prism_Qwen25_0_5B_Extra_DINOSigLIP_224px(Prism_Qwen25_0_5B_DINOSigLIP_224p
     llm_backbone_id: str = "qwen25-0_5b-extra"
 
 
+# JEPA-VLA: V-JEPA 2 ViT-L + Qwen2.5 0.5B
+@dataclass
+class Prism_Qwen25_0_5B_VJEPA_224px(Prism_Qwen25_0_5B_DINOSigLIP_224px):
+    model_id: str = "prism-qwen25-vjepa-224px+0_5b"
+    vision_backbone_id: str = "vjepa-vit-l"
+    image_resize_strategy: str = "resize-naive"
+    llm_backbone_id: str = "qwen25-0_5b-pure"
+    arch_specifier: str = "no-align+gelu-mlp"
+    finetune_epochs: int = 2
+    llm_max_length: int = 32768
+
+
 # === Define a Model Registry Enum for Reference & Validation ===
 @unique
 class ModelRegistry(Enum):
@@ -603,6 +615,9 @@ class ModelRegistry(Enum):
     # Qwen
     PRISM_QWEN25_DINOSIGLIP_224PX_0_5B = Prism_Qwen25_0_5B_DINOSigLIP_224px
     PRISM_QWEN25_EXTRA_DINOSIGLIP_224PX_0_5B = Prism_Qwen25_0_5B_Extra_DINOSigLIP_224px
+
+    # JEPA-VLA
+    PRISM_QWEN25_VJEPA_224PX_0_5B = Prism_Qwen25_0_5B_VJEPA_224px
 
     @property
     def model_id(self) -> str:

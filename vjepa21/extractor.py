@@ -28,6 +28,88 @@ def _clean_state_dict_key(state_dict):
     return new_state_dict
 
 
+def _convert_hf_vjepa_state_dict(state_dict):
+    """
+    Convert HuggingFace-format V-JEPA state dict to vjepa21 native format.
+
+    HF format (from facebook/vjepa2-*) uses keys like:
+      - encoder.embeddings.patch_embeddings.proj.weight
+      - encoder.layer.{i}.attention.query.weight
+      - encoder.layer.{i}.attention.key.weight
+      - encoder.layer.{i}.attention.value.weight
+      - encoder.layer.{i}.attention.proj.weight
+      - encoder.layer.{i}.mlp.fc1.weight
+      - encoder.layer.{i}.mlp.fc2.weight
+      - encoder.layer.{i}.norm1.weight
+      - encoder.layernorm.weight
+
+    vjepa21 native format uses:
+      - patch_embed.proj.weight
+      - blocks.{i}.attn.qkv.weight   (Q/K/V concatenated)
+      - blocks.{i}.attn.proj.weight
+      - blocks.{i}.mlp.fc1.weight
+      - blocks.{i}.mlp.fc2.weight
+      - blocks.{i}.norm1.weight
+      - norms_block.0.weight
+    """
+    import re
+
+    converted = {}
+    num_layers = 24  # ViT-L
+
+    # Map patch embedding
+    if "encoder.embeddings.patch_embeddings.proj.weight" in state_dict:
+        converted["patch_embed.proj.weight"] = state_dict["encoder.embeddings.patch_embeddings.proj.weight"]
+    if "encoder.embeddings.patch_embeddings.proj.bias" in state_dict:
+        converted["patch_embed.proj.bias"] = state_dict["encoder.embeddings.patch_embeddings.proj.bias"]
+
+    # Map each transformer block
+    for i in range(num_layers):
+        prefix_hf = f"encoder.layer.{i}"
+        prefix_native = f"blocks.{i}"
+
+        # Attention QKV (concatenate query, key, value)
+        q_w = state_dict.get(f"{prefix_hf}.attention.query.weight")
+        k_w = state_dict.get(f"{prefix_hf}.attention.key.weight")
+        v_w = state_dict.get(f"{prefix_hf}.attention.value.weight")
+        if q_w is not None and k_w is not None and v_w is not None:
+            converted[f"{prefix_native}.attn.qkv.weight"] = torch.cat([q_w, k_w, v_w], dim=0)
+
+        q_b = state_dict.get(f"{prefix_hf}.attention.query.bias")
+        k_b = state_dict.get(f"{prefix_hf}.attention.key.bias")
+        v_b = state_dict.get(f"{prefix_hf}.attention.value.bias")
+        if q_b is not None and k_b is not None and v_b is not None:
+            converted[f"{prefix_native}.attn.qkv.bias"] = torch.cat([q_b, k_b, v_b], dim=0)
+
+        # Attention proj
+        for suffix in ["weight", "bias"]:
+            k = f"{prefix_hf}.attention.proj.{suffix}"
+            if k in state_dict:
+                converted[f"{prefix_native}.attn.proj.{suffix}"] = state_dict[k]
+
+        # MLP
+        for suffix in ["weight", "bias"]:
+            for layer in ["fc1", "fc2"]:
+                k = f"{prefix_hf}.mlp.{layer}.{suffix}"
+                if k in state_dict:
+                    converted[f"{prefix_native}.mlp.{layer}.{suffix}"] = state_dict[k]
+
+        # Norms
+        for suffix in ["weight", "bias"]:
+            for norm in ["norm1", "norm2"]:
+                k = f"{prefix_hf}.{norm}.{suffix}"
+                if k in state_dict:
+                    converted[f"{prefix_native}.{norm}.{suffix}"] = state_dict[k]
+
+    # Final layernorm
+    for suffix in ["weight", "bias"]:
+        k = f"encoder.layernorm.{suffix}"
+        if k in state_dict:
+            converted[f"norms_block.0.{suffix}"] = state_dict[k]
+
+    return converted
+
+
 def _infer_ckpt_key(checkpoint):
     """Auto-detect encoder state dict key in checkpoint."""
     for key in ("ema_encoder", "target_encoder", "encoder"):
@@ -136,16 +218,55 @@ class VJEPA21Encoder:
         return model
 
     def _load_checkpoint(self, checkpoint_path):
-        """Load pretrained weights into the encoder."""
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        """Load pretrained weights into the encoder.
 
-        ckpt_key = _infer_ckpt_key(checkpoint)
-        if ckpt_key is not None:
-            state_dict = checkpoint[ckpt_key]
+        Supports:
+          - Single .pt/.pth file (native V-JEPA format)
+          - HuggingFace-format directory (model.safetensors or pytorch_model.bin)
+        """
+        import os
+        from pathlib import Path
+
+        path = Path(checkpoint_path)
+        is_hf_format = False
+
+        if path.is_dir():
+            # HuggingFace format directory
+            safetensors_file = path / "model.safetensors"
+            pytorch_file = path / "pytorch_model.bin"
+
+            if safetensors_file.exists():
+                try:
+                    from safetensors.torch import load_file
+                    state_dict = load_file(safetensors_file, device="cpu")
+                except ImportError:
+                    raise ImportError(
+                        "`safetensors` is required to load HF-format checkpoints. "
+                        "Install it with: pip install safetensors"
+                    )
+                is_hf_format = True
+            elif pytorch_file.exists():
+                state_dict = torch.load(pytorch_file, map_location="cpu", weights_only=True)
+                is_hf_format = True
+            else:
+                raise FileNotFoundError(
+                    f"Checkpoint directory {path} does not contain 'model.safetensors' or 'pytorch_model.bin'"
+                )
         else:
-            state_dict = checkpoint
+            # Single checkpoint file
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            ckpt_key = _infer_ckpt_key(checkpoint)
+            if ckpt_key is not None:
+                state_dict = checkpoint[ckpt_key]
+            else:
+                state_dict = checkpoint
 
-        state_dict = _clean_state_dict_key(state_dict)
+        # Detect and convert HF-format state dict
+        if is_hf_format or any(k.startswith("encoder.") for k in state_dict.keys()):
+            state_dict = _convert_hf_vjepa_state_dict(state_dict)
+        else:
+            state_dict = _clean_state_dict_key(state_dict)
+
         msg = self.model.load_state_dict(state_dict, strict=False)
 
         if msg.missing_keys:

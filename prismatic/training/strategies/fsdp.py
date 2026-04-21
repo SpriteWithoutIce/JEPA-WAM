@@ -81,10 +81,14 @@ class FSDPStrategy(TrainingStrategy):
         )
 
         # FSDP-Specific Parameters
+        #   =>> Use HYBRID_SHARD only for multi-node; single-node falls back to standard FULL_SHARD/SHARD_GRAD_OP
+        local_world_size = torch.cuda.device_count()
+        is_single_node = dist.is_initialized() and dist.get_world_size() == local_world_size
+
         if sharding_strategy == "shard-grad-op":
-            self.fsdp_sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
+            self.fsdp_sharding_strategy = ShardingStrategy.SHARD_GRAD_OP if is_single_node else ShardingStrategy._HYBRID_SHARD_ZERO2
         elif sharding_strategy == "full-shard":
-            self.fsdp_sharding_strategy = ShardingStrategy.HYBRID_SHARD
+            self.fsdp_sharding_strategy = ShardingStrategy.FULL_SHARD if is_single_node else ShardingStrategy.HYBRID_SHARD
         else:
             raise ValueError(f"FSDP Sharding Strategy {sharding_strategy} is not supported!")
 
