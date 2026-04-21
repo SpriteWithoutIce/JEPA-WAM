@@ -50,7 +50,7 @@ def _convert_hf_vjepa_state_dict(state_dict):
       - blocks.{i}.mlp.fc1.weight
       - blocks.{i}.mlp.fc2.weight
       - blocks.{i}.norm1.weight
-      - norms_block.0.weight
+      - norm.weight
     """
     import re
 
@@ -105,7 +105,7 @@ def _convert_hf_vjepa_state_dict(state_dict):
     for suffix in ["weight", "bias"]:
         k = f"encoder.layernorm.{suffix}"
         if k in state_dict:
-            converted[f"norms_block.0.{suffix}"] = state_dict[k]
+            converted[f"norm.{suffix}"] = state_dict[k]
 
     return converted
 
@@ -197,8 +197,6 @@ class VJEPA21Encoder:
             wide_SiLU=True,
             uniform_power=False,
             use_rope=True,
-            img_temporal_dim_size=1,
-            interpolate_rope=True,
         )
 
         model_fn = {
