@@ -560,10 +560,7 @@ class PrismaticVLM(VLM):
             z_action = llm_hidden[:, -1, :]  # [B, D_llm]
 
             # Action Head (Flow Matching)
-            if self.action_head is not None and "actions" in kwargs and "proprio" in kwargs:
-                actions = kwargs["actions"]
-                proprio = kwargs["proprio"]
-                if actions is not None and proprio is not None:
+            if self.action_head is not None and actions is not None and proprio is not None:
                     # Ensure actions has the right shape [B, H_a, D_action]
                     if actions.dim() == 2:
                         actions = actions.unsqueeze(1)  # [B, 1, D_action]
