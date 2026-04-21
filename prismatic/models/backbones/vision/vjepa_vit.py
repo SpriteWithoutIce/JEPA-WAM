@@ -99,11 +99,13 @@ class VJEPAVisionBackbone(VisionBackbone):
         """Encode current-frame images.
 
         Args:
-            pixel_values: [B, V, 3, H, W]
+            pixel_values: [B, V, 3, H, W] or [B, 3, H, W]
         Returns:
             [B, V*196, D_jepa]
         """
         self._ensure_device(pixel_values.device)
+        if pixel_values.ndim == 4:
+            pixel_values = pixel_values.unsqueeze(1)  # [B, 1, C, H, W]
         B, V, C, H, W = pixel_values.shape
 
         # Duplicate frame to satisfy T>=2 requirement
@@ -121,11 +123,13 @@ class VJEPAVisionBackbone(VisionBackbone):
         """Encode future-frame images (for aux head supervision).
 
         Args:
-            future_pixel_values: [B, V, 8, 3, H, W]
+            future_pixel_values: [B, V, 8, 3, H, W] or [B, 8, 3, H, W]
         Returns:
             [B, V, 4, 14, 14, D_jepa]
         """
         self._ensure_device(future_pixel_values.device)
+        if future_pixel_values.ndim == 5:
+            future_pixel_values = future_pixel_values.unsqueeze(1)  # [B, 1, T, C, H, W]
         B, V, T, C, H, W = future_pixel_values.shape
 
         x = future_pixel_values.reshape(B * V, T, C, H, W)  # [B*V, 8, 3, H, W]
