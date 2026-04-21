@@ -14,6 +14,7 @@ import jsonlines
 import numpy as np
 import torch
 import wandb
+import swanlab
 
 from prismatic.overwatch import initialize_overwatch
 
@@ -73,7 +74,7 @@ class WeightsBiasesTracker:
     @overwatch.rank_zero_only
     def initialize(self) -> None:
         if self.use_wandb:
-            wandb.init(
+            swanlab.init(
                 name=self.run_id,
                 dir=self.wandb_dir,
                 config=self.hparams,
@@ -85,17 +86,17 @@ class WeightsBiasesTracker:
     @overwatch.rank_zero_only
     def write_hyperparameters(self) -> None:
         if self.use_wandb:
-            wandb.config = self.hparams
+            swanlab.config = self.hparams
 
     @overwatch.rank_zero_only
     def write(self, global_step: int, metrics: Dict[str, Union[int, float]]) -> None:
         if self.use_wandb:
-            wandb.log(metrics, step=global_step)
+            swanlab.log(metrics, step=global_step)
 
     @staticmethod
     def finalize(self) -> None:
         if overwatch.is_rank_zero() and self.use_wandb:
-            wandb.finish()
+            swanlab.finish()
 
         # A job gets 210 seconds to get its affairs in order
         time.sleep(210)
@@ -255,6 +256,8 @@ class VLAMetrics:
             "action_accuracy": deque(maxlen=window_size),
             "step_time": deque(maxlen=window_size),
             "lr": [],
+            "loss_action": deque(maxlen=window_size),
+            "loss_aux": deque(maxlen=window_size),
         }
 
         # Created metrics buffers for individual tracked datasets
@@ -264,13 +267,13 @@ class VLAMetrics:
         for tracker in self.trackers:
             tracker.write(global_step, metrics)
 
-    def get_status(self, loss: Optional[torch.Tensor] = None) -> str:
+    def get_status(self, loss: Optional[torch.Tensor] = None, loss_action: Optional[torch.Tensor] = None, loss_aux: Optional[torch.Tensor] = None) -> str:
         lr = self.state["lr"][-1] if len(self.state["lr"]) > 0 else 0
         if loss is None:
             return f"=>> [Epoch {self.epoch:03d}] Global Step {self.global_step:06d} =>> LR :: {lr:.6f}"
 
         # Otherwise, embed `loss` in status report!
-        return f"=>> [Epoch {self.epoch:03d}] Global Step {self.global_step:06d} =>> LR :: {lr:.6f} - Loss :: {loss:.4f}"
+        return f"=>> [Epoch {self.epoch:03d}] Global Step {self.global_step:06d} =>> LR :: {lr:.6f} - Loss :: {loss:.4f} - Action :: {loss_action:.4f} - Aux :: {loss_aux:.4f}"
 
     def commit(
         self,
@@ -307,7 +310,7 @@ class VLAMetrics:
                 self.state["loss_raw"].append(loss_val)
                 self.state["loss"].append(loss_val)
             else:
-                self.state[key].append(value.detach())
+                self.state[key].append(value)
 
     def commit_for_dataset(self, dataset_name: str, **kwargs) -> None:
         self.dataset_trackers[dataset_name].commit(**kwargs)
@@ -317,10 +320,12 @@ class VLAMetrics:
         # Note :: Raw Loss is an Average over Gradient Accumulation Steps --> No Smoothing!
         loss_raw = torch.stack(list(self.state["loss_raw"])).mean().item()
         loss = torch.stack(list(self.state["loss"])).mean().item()
-        l1_loss = torch.stack(list(self.state["l1_loss"])).mean().item()
-        action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
+        # l1_loss = torch.stack(list(self.state["l1_loss"])).mean().item()
+        # action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
+        loss_action = torch.stack(list(self.state["loss_action"])).mean().item()
+        loss_aux = torch.stack(list(self.state["loss_aux"])).mean().item()
         step_time, lr = np.mean(list(self.state["step_time"])), self.state["lr"][-1]
-        status = self.get_status(loss)
+        status = self.get_status(loss, loss_action, loss_aux)
 
         # Get metrics per dataset
         dataset_metrics = {}
@@ -328,7 +333,7 @@ class VLAMetrics:
             dataset_metrics.update(
                 {
                     f"{ds}/L1 Loss": torch.stack(list(tracker.state["l1_loss"])).mean().item(),
-                    f"{ds}/Action Token Accuracy": torch.stack(list(tracker.state["action_accuracy"])).mean().item(),
+                    # f"{ds}/Action Token Accuracy": torch.stack(list(tracker.state["action_accuracy"])).mean().item(),
                 }
             )
 
@@ -340,8 +345,10 @@ class VLAMetrics:
                 f"{prefix}/Step": self.global_step,
                 f"{prefix}/Epoch": self.epoch,
                 f"{prefix}/Loss": loss,
-                f"{prefix}/L1 Loss": l1_loss,
-                f"{prefix}/Action Token Accuracy": action_accuracy,
+                # f"{prefix}/L1 Loss": l1_loss,
+                # f"{prefix}/Action Token Accuracy": action_accuracy,
+                f"{prefix}/Loss Action": loss_action,
+                f"{prefix}/Loss Aux": loss_aux,
                 f"{prefix}/Loss (Raw)": loss_raw,
                 f"{prefix}/Learning Rate": lr,
                 f"{prefix}/Step Time": step_time,

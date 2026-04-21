@@ -19,6 +19,7 @@ import torch
 from PIL import Image
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy
 from transformers.modeling_outputs import CausalLMOutputWithPast
+import torch.nn.functional as F
 
 from prismatic.models.action_heads import ActionHead, AuxHead
 from prismatic.models.backbones.llm import LLMBackbone

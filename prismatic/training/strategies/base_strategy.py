@@ -325,9 +325,9 @@ class TrainingStrategy(ABC):
                 # New: log action_head loss and aux_head loss if present
                 if isinstance(output, dict):
                     if "loss_action" in output:
-                        metrics.commit(loss_action=output["loss_action"].item())
+                        metrics.commit(loss_action=output["loss_action"])
                     if "loss_aux" in output:
-                        metrics.commit(loss_aux=output["loss_aux"].item())
+                        metrics.commit(loss_aux=output["loss_aux"])
 
                 # === Legacy Action Token Metrics (only if logits + action_tokenizer are valid) ===
                 if logits is not None and action_tokenizer is not None:

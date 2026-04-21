@@ -20,6 +20,7 @@ import tqdm
 from libero.libero import benchmark
 
 import wandb
+import swanlab
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -207,8 +208,7 @@ def setup_logging(cfg: GenerateConfig):
 
     # Initialize Weights & Biases logging if enabled
     if cfg.use_wandb:
-        wandb.init(
-            entity=cfg.wandb_entity,
+        swanlab.init(
             project=cfg.wandb_project,
             name=run_id,
         )
@@ -465,7 +465,7 @@ def run_task(
 
     # Log to wandb if enabled
     if cfg.use_wandb:
-        wandb.log(
+        swanlab.log(
             {
                 f"success_rate/{task_description}": task_success_rate,
                 f"num_episodes/{task_description}": task_episodes,
@@ -535,13 +535,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     # Log to wandb if enabled
     if cfg.use_wandb:
-        wandb.log(
+        swanlab.log(
             {
                 "success_rate/total": final_success_rate,
                 "num_episodes/total": total_episodes,
             }
         )
-        wandb.save(local_log_filepath)
+        # wandb.save(local_log_filepath)
 
     # Close log file
     if log_file:

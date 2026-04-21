@@ -198,9 +198,10 @@ class ActionHead(nn.Module):
         noise = torch.randn_like(action_gt)
         action_noisy = (1 - t[:, None, None]) * noise + t[:, None, None] * action_gt
         velocity_gt = action_gt - noise
-
+        
         # Tokenize
-        state_tok = self.state_enc(proprio)  # [B, 1, D_a]
+        state = proprio[:,0,:]
+        state_tok = self.state_enc(state)  # [B, 1, D_a]
         act_tok = self.noisy_emb(action_noisy, t)  # [B, H_a, D_a]
         x = torch.cat([state_tok, act_tok], dim=1)  # [B, 1 + H_a, D_a]
 

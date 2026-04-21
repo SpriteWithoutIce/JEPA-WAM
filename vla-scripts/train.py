@@ -80,7 +80,7 @@ class TrainConfig:
 
     # Tracking Parameters
     trackers: Tuple[str, ...] = ("jsonl", "wandb")                  # Trackers to initialize (if W&B, add config!)
-    wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
+    wandb_project: str = "jepa-wam"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
     use_wandb: bool = False
 
@@ -290,10 +290,10 @@ def train(cfg: TrainConfig) -> None:
     # Run VLA Training
     overwatch.info("Starting VLA Training Loop")
     train_strategy.run_vla_training(
-        vla_dataset,
-        collator,
-        action_tokenizer,
-        metrics,
+        vla_dataset=vla_dataset,
+        collator=collator,
+        action_tokenizer=None,
+        metrics=metrics,
         save_interval=cfg.save_interval,
     )
 
