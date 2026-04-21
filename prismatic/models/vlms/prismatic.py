@@ -562,8 +562,15 @@ class PrismaticVLM(VLM):
             # Action Head (Flow Matching)
             if self.action_head is not None and actions is not None and proprio is not None:
                     # Ensure actions has the right shape [B, H_a, D_action]
+                    if actions.dim() == 4 and actions.shape[1] == 1:
+                        actions = actions.squeeze(1)
                     if actions.dim() == 2:
                         actions = actions.unsqueeze(1)  # [B, 1, D_action]
+                    
+                    # Ensure proprio has the right shape [B, D_proprio]
+                    if proprio.dim() == 3 and proprio.shape[1] == 1:
+                        proprio = proprio.squeeze(1)
+                    
                     loss_action, _ = self.action_head(z_action, proprio, actions)
                     total_loss = total_loss + loss_action
 
