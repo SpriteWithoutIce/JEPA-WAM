@@ -94,6 +94,7 @@ class VJEPAVisionBackbone(VisionBackbone):
         model_device = next(self.encoder.model.parameters()).device
         if model_device != target_device:
             self.encoder.model = self.encoder.model.to(target_device)
+            self.encoder.device = target_device
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Encode current-frame images.
