@@ -21,14 +21,14 @@ from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import torch.nn.functional as F
 
-from prismatic.models.action_heads import ActionHead, AuxHead
+from prismatic.models.action_heads import ActionHead, AuxHead, L1RegressionActionHead
 from prismatic.models.backbones.llm import LLMBackbone
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
-from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK, PROPRIO_DIM
+from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK, NUM_TOKENS, PROPRIO_DIM
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -75,22 +75,37 @@ class PrismaticVLM(VLM):
 
         # === Action Head & Aux Head (JEPA-VLA) ===
         self.use_action_head = kwargs.get("use_action_head", True)
+        self.action_head_type = kwargs.get("action_head_type", "flow").lower()
+        self.action_placeholder_tokens = NUM_TOKENS if self.action_head_type == "l1" else 0
         self.use_aux_head = kwargs.get("use_aux_head", True)
         self.lambda_aux = kwargs.get("lambda_aux", 0.2)
 
         if self.use_action_head:
-            self.action_head = ActionHead(
-                d_proprio=kwargs.get("d_proprio", PROPRIO_DIM),
-                d_action=kwargs.get("d_action", ACTION_DIM),
-                d_a=kwargs.get("d_a", 1024),
-                d_llm=llm_backbone.embed_dim,
-                horizon=kwargs.get("action_horizon", NUM_ACTIONS_CHUNK),
-                n_heads=kwargs.get("n_heads_action", 16),
-                num_layers=kwargs.get("num_layers_action", 16),
-                ffn_ratio=kwargs.get("ffn_ratio_action", 4),
-                beta_alpha=kwargs.get("beta_alpha", 1.5),
-                beta_beta=kwargs.get("beta_beta", 1.0),
-            )
+            if self.action_head_type == "flow":
+                self.action_head = ActionHead(
+                    d_proprio=kwargs.get("d_proprio", PROPRIO_DIM),
+                    d_action=kwargs.get("d_action", ACTION_DIM),
+                    d_a=kwargs.get("d_a", 1024),
+                    d_llm=llm_backbone.embed_dim,
+                    horizon=kwargs.get("action_horizon", NUM_ACTIONS_CHUNK),
+                    n_heads=kwargs.get("n_heads_action", 16),
+                    num_layers=kwargs.get("num_layers_action", 16),
+                    ffn_ratio=kwargs.get("ffn_ratio_action", 4),
+                    beta_alpha=kwargs.get("beta_alpha", 1.5),
+                    beta_beta=kwargs.get("beta_beta", 1.0),
+                )
+            elif self.action_head_type == "l1":
+                self.action_head = L1RegressionActionHead(
+                    d_proprio=kwargs.get("d_proprio", PROPRIO_DIM),
+                    d_action=kwargs.get("d_action", ACTION_DIM),
+                    d_llm=llm_backbone.embed_dim,
+                    hidden_dim=llm_backbone.embed_dim,
+                    horizon=kwargs.get("action_horizon", NUM_ACTIONS_CHUNK),
+                    num_blocks=kwargs.get("l1_num_blocks", 24),
+                    use_pro_version=kwargs.get("l1_use_pro_version", True),
+                )
+            else:
+                raise ValueError(f"Unsupported action_head_type: {self.action_head_type}")
         else:
             self.action_head = None
 
@@ -347,7 +362,8 @@ class PrismaticVLM(VLM):
         head_classes = {LinearProjector, MLPProjector, FusedMLPProjector}
         if self.action_head is not None:
             from prismatic.models.action_heads import ActionHeadBackbone, SelfAttnBlock, CrossAttnBlock
-            head_classes.update({ActionHeadBackbone, SelfAttnBlock, CrossAttnBlock})
+            from prismatic.models.action_heads import MLPResNet, MLPResNetBlock, MLPResNetBlockPro
+            head_classes.update({ActionHeadBackbone, SelfAttnBlock, CrossAttnBlock, MLPResNet, MLPResNetBlock, MLPResNetBlockPro})
         if self.aux_head is not None:
             from prismatic.models.action_heads import AuxDecoderBlock
             head_classes.add(AuxDecoderBlock)
@@ -531,14 +547,18 @@ class PrismaticVLM(VLM):
             fused_attention_mask = torch.vstack([multimodal_attention_mask, unimodal_attention_mask])
             fused_labels = torch.vstack([multimodal_labels, unimodal_labels])
 
-        # Run LLM Forward with output_hidden_states=True
+        # Run LLM Forward with output_hidden_states=True. If all labels are
+        # ignored, skip LM CE loss entirely; continuous heads provide training.
+        llm_labels = fused_labels
+        if llm_labels is not None and not torch.any(llm_labels != IGNORE_INDEX):
+            llm_labels = None
         llm_output = self.llm_backbone(
             input_ids=None,
             attention_mask=fused_attention_mask,
             position_ids=None,
             past_key_values=past_key_values,
             inputs_embeds=fused_embeddings,
-            labels=fused_labels,
+            labels=llm_labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=True,
@@ -558,7 +578,13 @@ class PrismaticVLM(VLM):
             else:
                 V = 1
 
+            action_placeholder_tokens = min(self.action_placeholder_tokens, max(0, llm_hidden.shape[1] - 1))
             z_action = llm_hidden[:, -1, :]  # [B, D_llm]
+            aux_memory = (
+                llm_hidden[:, : -action_placeholder_tokens, :]
+                if action_placeholder_tokens > 0
+                else llm_hidden
+            )
 
             # Action Head (Flow Matching)
             if self.action_head is not None and actions is not None and proprio is not None:
@@ -572,12 +598,20 @@ class PrismaticVLM(VLM):
                     if proprio.dim() == 3 and proprio.shape[1] == 1:
                         proprio = proprio.squeeze(1)
                     
-                    loss_action, _ = self.action_head(z_action, proprio, actions)
+                    loss_action, _ = self.action_head(
+                        z_action,
+                        proprio,
+                        actions,
+                        hidden_states=llm_output.hidden_states,
+                        task_token_count=projected_patch_embeddings.shape[1],
+                        action_token_count=action_placeholder_tokens,
+                        phase="Training" if self.training else "Inference",
+                    )
                     total_loss = total_loss + loss_action
 
             # Aux Head (Future JEPA Embedding Prediction)
             if self.aux_head is not None and vjepa_target is not None and self.training:
-                aux_pred = self.aux_head(llm_hidden, V=V)
+                aux_pred = self.aux_head(aux_memory, V=V)
                 # Per-patch layer-normalized MSE (no learnable params)
                 pred_n = F.layer_norm(aux_pred, aux_pred.shape[-1:])
                 target_n = F.layer_norm(vjepa_target, vjepa_target.shape[-1:])

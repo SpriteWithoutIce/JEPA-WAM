@@ -103,6 +103,7 @@ class PaddedCollatorForActionPrediction:
         input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
         pixel_values = [instance["pixel_values"] for instance in instances]
         future_pixel_values = [instance.get("future_pixel_values") for instance in instances]
+        future_pixel_values_wrist = [instance.get("future_pixel_values_wrist") for instance in instances]
         if "dataset_name" in instances[0]:
             dataset_names = [instance["dataset_name"] for instance in instances]
         else:
@@ -144,17 +145,22 @@ class PaddedCollatorForActionPrediction:
 
         # Stack all `pixel_values` --> depending on type is torch.Tensor or Dict[str, torch.Tensor]
         if isinstance(pixel_values[0], torch.Tensor):
+            pixel_values = torch.stack(pixel_values)
             if "pixel_values_wrist" in instances[0]:
                 pixel_values_wrist = [instance["pixel_values_wrist"] for instance in instances]
-                pixel_values = torch.cat((torch.stack(pixel_values), torch.stack(pixel_values_wrist)), dim=1)
+                pixel_values_wrist = torch.stack(pixel_values_wrist)
+                pixel_values = torch.cat((pixel_values.unsqueeze(1), pixel_values_wrist), dim=1)
             else:
-                pixel_values = torch.stack(pixel_values)
+                pixel_values = pixel_values
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
         # Stack future_pixel_values (already tensors from batch transform)
         if future_pixel_values[0] is not None:
             future_pixel_values = torch.stack(future_pixel_values)
+            if future_pixel_values_wrist[0] is not None:
+                future_pixel_values_wrist = torch.stack(future_pixel_values_wrist)
+                future_pixel_values = torch.cat((future_pixel_values.unsqueeze(1), future_pixel_values_wrist), dim=1)
         else:
             future_pixel_values = None
 

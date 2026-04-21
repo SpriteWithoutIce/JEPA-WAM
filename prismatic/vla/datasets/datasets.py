@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple, Type
 import numpy as np
-import random
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, IterableDataset
@@ -20,7 +19,7 @@ from prismatic.models.backbones.llm.prompting import PromptBuilder, QwenPromptBu
 from prismatic.models.backbones.vision import ImageTransform
 from prismatic.util.data_utils import tree_map
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.constants import ACTION_DIM, ACTION_PROPRIO_NORMALIZATION_TYPE, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX, NUM_ACTIONS_CHUNK, PROPRIO_DIM, STOP_INDEX, NUM_TOKENS
+from prismatic.vla.constants import ACTION_PROPRIO_NORMALIZATION_TYPE, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX, NUM_ACTIONS_CHUNK, NUM_TOKENS
 from prismatic.vla.datasets.rlds import make_interleaved_dataset, make_single_dataset
 from prismatic.vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
 
@@ -36,11 +35,12 @@ class RLDSBatchTransform:
     use_wrist_image: bool = False
     use_proprio: bool = False
     use_minivlm: bool = False
+    action_head_type: str = "flow"
 
 
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
         """Converts a RLDS batch to the format expected by the JEPA-WAM collator/models."""
-        dataset_name, current_action = rlds_batch["dataset_name"], rlds_batch["action"][0]
+        dataset_name = rlds_batch["dataset_name"]
         
         # Observation now contains [current_frame, future_frame_1, ..., future_frame_8]
         obs = rlds_batch["observation"]
@@ -50,75 +50,25 @@ class RLDSBatchTransform:
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
         actions = rlds_batch["action"]
 
-        # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
+        # Construct Chat-based Prompt. Continuous actions are supervised by the
+        # flow action head, so no discrete action tokens are appended or labeled.
         prompt_builder = self.prompt_builder_fn("openvla")
-
-        # Get future action chunk
-        future_actions = rlds_batch["action"][1:]
 
         if self.use_minivlm:
             self.prompt_builder_fn = QwenPromptBuilder
             prompt_builder = self.prompt_builder_fn("openvla")
-            # Get action chunk string
-            future_actions_string = self.action_tokenizer(future_actions,self.use_minivlm)
-            current_action_string = self.action_tokenizer(current_action,self.use_minivlm)
 
-            action_chunk_string = [current_action_string] + future_actions_string
-            flattened_action_chunk_string = [item for sublist in action_chunk_string for item in sublist]
-            action_chunk_len = len(flattened_action_chunk_string) 
-
-            conversation = [
-                {"from": "human", "value": f"What action should the robot take to {lang}?"},
-                {"from": "gpt", "value": ''},
-            ]
-
-            for turn in conversation:
-                prompt_builder.add_turn(turn["from"], turn["value"])
-
-            prompt = prompt_builder.get_prompt() #e.g. 'In: What action should the robot take to put both the cream cheese box and the butter in the basket?\nOut: 希</s>'
-            input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-
-            if len(input_ids) >= 3:
-                del input_ids[-3] 
-                del input_ids[-2] 
-                del input_ids[-1] 
-
-            if NUM_TOKENS<len(flattened_action_chunk_string):
-                input_ids = input_ids + flattened_action_chunk_string[:NUM_TOKENS]
-            else:
-                remaining_length = NUM_TOKENS - len(flattened_action_chunk_string)
-                extended_array = random.choices(flattened_action_chunk_string, k=remaining_length)
-                
-                input_ids = input_ids + flattened_action_chunk_string + extended_array
-            labels = list(input_ids)
-            action_chunk_len = NUM_TOKENS
-
-        else:
-            future_actions_string = ''.join(self.action_tokenizer(future_actions, use_minivlm=False))
-
-            # Get action chunk string
-            current_action_string = self.action_tokenizer(current_action, use_minivlm=False)
-            action_chunk_string = current_action_string + future_actions_string
-            action_chunk_len = len(action_chunk_string)
-
-            conversation = [
-                {"from": "human", "value": f"What action should the robot take to {lang}?"},
-                {"from": "gpt", "value": action_chunk_string[0]},
-            ]
-            # remove action token
-            # conversation = [
-            #     {"from": "human", "value": f"What action should the robot take to {lang}?"},
-            #     {"from": "gpt", "value": ""},
-            # ]
-            action_chunk_len = 1
-
-
-            for turn in conversation:
-                prompt_builder.add_turn(turn["from"], turn["value"])
-            prompt = prompt_builder.get_prompt() #e.g. 'In: What action should the robot take to put both the cream cheese box and the butter in the basket?\nOut: 希</s>'
-            # Tokenize (w/ `base_tokenizer`)
-            input_ids = self.base_tokenizer(prompt, add_special_tokens=True).input_ids
-            labels = list(input_ids)
+        conversation = [
+            {"from": "human", "value": f"What action should the robot take to {lang}?"},
+            {"from": "gpt", "value": ""},
+        ]
+        for turn in conversation:
+            prompt_builder.add_turn(turn["from"], turn["value"])
+        prompt = prompt_builder.get_prompt()
+        input_ids = self.base_tokenizer(prompt, add_special_tokens=True).input_ids
+        if self.action_head_type.lower() == "l1":
+            input_ids = input_ids + [ACTION_TOKEN_BEGIN_IDX] * NUM_TOKENS
+        labels = [IGNORE_INDEX] * len(input_ids)
 
         # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
         #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
@@ -126,10 +76,9 @@ class RLDSBatchTransform:
         pixel_values = self.image_transform(img)
         future_pixel_values = torch.stack([self.image_transform(fimg) for fimg in future_imgs])
 
-        # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
-        labels[: -(action_chunk_len + 1)] = IGNORE_INDEX
-        if not self.predict_stop_token:
-            labels[-1] = IGNORE_INDEX
+        # [CRITICAL] The LLM is used as a context encoder here; all language
+        # labels are ignored. Action supervision comes from continuous heads.
+        labels[:] = IGNORE_INDEX
 
         return_dict = dict(
             pixel_values=pixel_values,
@@ -143,12 +92,23 @@ class RLDSBatchTransform:
         # Add additional inputs
         if self.use_wrist_image:
             all_wrist_pixels = []
+            all_future_wrist_pixels = []
             for k in rlds_batch["observation"].keys():
                 if "wrist" in k:
                     img_wrist = Image.fromarray(rlds_batch["observation"][k][0])
                     pixel_values_wrist = self.image_transform(img_wrist)
                     all_wrist_pixels.append(pixel_values_wrist)
-            return_dict["pixel_values_wrist"] = torch.cat(all_wrist_pixels, dim=0)
+
+                    future_wrist_imgs = [
+                        Image.fromarray(rlds_batch["observation"][k][i])
+                        for i in range(1, len(rlds_batch["observation"][k]))
+                    ]
+                    future_wrist_pixels = torch.stack([self.image_transform(fimg) for fimg in future_wrist_imgs])
+                    all_future_wrist_pixels.append(future_wrist_pixels)
+
+            if all_wrist_pixels:
+                return_dict["pixel_values_wrist"] = torch.stack(all_wrist_pixels)
+                return_dict["future_pixel_values_wrist"] = torch.stack(all_future_wrist_pixels)
         if self.use_proprio and "proprio" in rlds_batch["observation"]:
             proprio = rlds_batch["observation"]["proprio"]
             return_dict["proprio"] = proprio

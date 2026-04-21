@@ -73,6 +73,8 @@ class TrainConfig:
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
     save_interval: int = 2500                                       # Interval for saving checkpoints (in steps)
     image_aug: bool = False                                         # Whether to enable image augmentations
+    use_wrist_image: bool = True                                    # Whether to include wrist camera images
+    debug_batch_shapes: bool = True                                 # Print first training batch tensor shapes
     seed: int = 7                                                   # Random seed (for reproducibility)
 
     # HF Hub Credentials (for any gated models)
@@ -184,6 +186,7 @@ def train(cfg: TrainConfig) -> None:
                 enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training,
                 # Pass JEPA-VLA head hyperparameters
                 use_action_head=cfg.vla.use_action_head,
+                action_head_type=cfg.vla.action_head_type,
                 use_aux_head=cfg.vla.use_aux_head,
                 d_a=cfg.vla.d_a,
                 n_heads_action=cfg.vla.n_heads_action,
@@ -191,6 +194,8 @@ def train(cfg: TrainConfig) -> None:
                 ffn_ratio_action=cfg.vla.ffn_ratio_action,
                 beta_alpha=cfg.vla.beta_alpha,
                 beta_beta=cfg.vla.beta_beta,
+                l1_use_pro_version=cfg.vla.l1_use_pro_version,
+                l1_num_blocks=cfg.vla.l1_num_blocks,
                 d_aux=cfg.vla.d_aux,
                 n_heads_aux=cfg.vla.n_heads_aux,
                 num_layers_aux=cfg.vla.num_layers_aux,
@@ -244,6 +249,8 @@ def train(cfg: TrainConfig) -> None:
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
         use_proprio=True,
+        use_wrist_image=cfg.use_wrist_image,
+        action_head_type=cfg.vla.action_head_type,
     )
 
     # Save dataset statistics for de-normalization at inference time
@@ -286,6 +293,7 @@ def train(cfg: TrainConfig) -> None:
         resume_epoch=cfg.resume_epoch,
         use_wandb=cfg.use_wandb
     )
+    train_strategy.debug_batch_shapes = cfg.debug_batch_shapes
 
     # Run VLA Training
     overwatch.info("Starting VLA Training Loop")

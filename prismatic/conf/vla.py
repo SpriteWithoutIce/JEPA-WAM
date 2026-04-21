@@ -56,14 +56,17 @@ class VLAConfig(ChoiceRegistry):
     vjepa_checkpoint_path: Optional[str] = None      # Path to V-JEPA 2.1 .pt checkpoint
     future_obs_window_size: int = 0                  # Number of future frames to extract for aux target
 
-    # Action Head (GR00T Flow Matching)
+    # Action Head
     use_action_head: bool = True
+    action_head_type: str = "flow"                   # "flow" or "l1"
     d_a: int = 1024                                  # Internal dim of action head
     n_heads_action: int = 16
     num_layers_action: int = 16
     ffn_ratio_action: int = 4
     beta_alpha: float = 1.5
     beta_beta: float = 1.0
+    l1_use_pro_version: bool = True
+    l1_num_blocks: int = 24
 
     # Aux Head (Cross-Attention Decoder)
     use_aux_head: bool = True

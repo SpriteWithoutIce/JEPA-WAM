@@ -294,6 +294,29 @@ class TrainingStrategy(ABC):
             #   => This means looping over the DataLoader is basically "infinite" (so no outer loop over epochs).
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
             for batch in dataloader:
+                if getattr(self, "debug_batch_shapes", False) and not getattr(self, "_printed_batch_shapes", False):
+                    if overwatch.is_rank_zero():
+                        shape_lines = []
+                        for key in (
+                            "pixel_values",
+                            "future_pixel_values",
+                            "actions",
+                            "proprio",
+                            "input_ids",
+                            "attention_mask",
+                            "labels",
+                        ):
+                            value = batch.get(key)
+                            if isinstance(value, torch.Tensor):
+                                shape_lines.append(f"{key}={tuple(value.shape)} dtype={value.dtype}")
+                            else:
+                                shape_lines.append(f"{key}={type(value).__name__}")
+                        dataset_names = batch.get("dataset_names")
+                        if dataset_names is not None:
+                            shape_lines.append(f"dataset_names[0]={dataset_names[0]!r}")
+                        overwatch.info("First training batch shapes: %s", " | ".join(shape_lines))
+                    self._printed_batch_shapes = True
+
                 # Note that we'll unpack batch (and let AMP/FSDP do its thing) in the VLM.forward() call
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
                 with torch.autocast(
