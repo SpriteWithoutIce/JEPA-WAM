@@ -19,6 +19,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
     --vla.action_head_type l1 \
     --use_wrist_image True \
     --debug_batch_shapes True \
+    --vla.shuffle_buffer_size 10000 \
     --save_interval 2500 \
     --seed 7 \
     --use_wandb True \
