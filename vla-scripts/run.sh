@@ -16,6 +16,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
     --vla.per_device_batch_size 4 \
     --vla.learning_rate 2e-4 \
     --vla.max_steps 85000 \
+    --vla.shuffle_buffer_size 10000 \
     --save_interval 2500 \
     --seed 7 \
     --use_wandb True \
