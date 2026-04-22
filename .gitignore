@@ -153,3 +153,4 @@ rollouts/
 wandb/
 outputs/
 runs/
+logs/
