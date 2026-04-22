@@ -6,4 +6,5 @@ python experiments/robot/libero/run_libero_eval.py \
     --num_trials_per_task 2 \
     --num_images_in_input 2 \
     --use_proprio True \
-    --use_l1_regression True
+    --vla.use_aux_head False \
+    --use_l1_regression False
