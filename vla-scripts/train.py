@@ -259,6 +259,7 @@ def train(cfg: TrainConfig) -> None:
         use_proprio=True,
         use_wrist_image=cfg.use_wrist_image,
         action_head_type=cfg.vla.action_head_type,
+        future_obs_window_size=(cfg.vla.future_obs_window_size if cfg.vla.use_aux_head else 0),
     )
 
     # Save dataset statistics for de-normalization at inference time

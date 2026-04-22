@@ -34,6 +34,7 @@ def get_vla_dataset_and_collator(
     use_proprio: bool = False,
     use_wrist_image: bool = False,
     action_head_type: str = "flow",
+    future_obs_window_size: int = 8,
 ) -> Tuple[Dataset, ActionTokenizer, PaddedCollatorForActionPrediction]:
     """Initialize RLDS Dataset (wraps TFDS), ActionTokenizer, and initialize transform/collation functions."""
     action_tokenizer = ActionTokenizer(tokenizer)
@@ -41,6 +42,7 @@ def get_vla_dataset_and_collator(
         action_tokenizer, tokenizer, image_transform, prompt_builder_fn,
         predict_stop_token=predict_stop_token, use_proprio=use_proprio,
         use_wrist_image=use_wrist_image, action_head_type=action_head_type,
+        future_obs_window_size=future_obs_window_size,
     )
     collator = PaddedCollatorForActionPrediction(
         tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side
@@ -56,6 +58,7 @@ def get_vla_dataset_and_collator(
         shuffle_buffer_size=shuffle_buffer_size,
         train=train,
         image_aug=image_aug,
+        future_obs_window_size=future_obs_window_size,
     )
 
     return dataset, action_tokenizer, collator

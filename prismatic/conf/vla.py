@@ -234,7 +234,8 @@ class Exp_JEPAVLA_Qwen25_VJEPA_0_5B_LIBERO_90(Exp_SigLIP_224px_Bridge):
     warmup_ratio: float = 0.0
 
     # JEPA-specific overrides
-    future_obs_window_size: int = 8
+    use_aux_head: bool = False
+    future_obs_window_size: int = 0
     vjepa_checkpoint_path: Optional[str] = None
 
 

@@ -36,16 +36,21 @@ class RLDSBatchTransform:
     use_proprio: bool = False
     use_minivlm: bool = False
     action_head_type: str = "flow"
+    future_obs_window_size: int = 8
 
 
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
         """Converts a RLDS batch to the format expected by the JEPA-WAM collator/models."""
         dataset_name = rlds_batch["dataset_name"]
         
-        # Observation now contains [current_frame, future_frame_1, ..., future_frame_8]
+        # Observation contains [current_frame, future_frame_1, ...] when future_obs_window_size > 0.
         obs = rlds_batch["observation"]
         img = Image.fromarray(obs["image_primary"][0])
-        future_imgs = [Image.fromarray(obs["image_primary"][i]) for i in range(1, len(obs["image_primary"]))]
+        future_imgs = (
+            [Image.fromarray(obs["image_primary"][i]) for i in range(1, len(obs["image_primary"]))]
+            if self.future_obs_window_size > 0
+            else []
+        )
         
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
         actions = rlds_batch["action"]
@@ -74,7 +79,6 @@ class RLDSBatchTransform:
         #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
         input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
         pixel_values = self.image_transform(img)
-        future_pixel_values = torch.stack([self.image_transform(fimg) for fimg in future_imgs])
 
         # [CRITICAL] The LLM is used as a context encoder here; all language
         # labels are ignored. Action supervision comes from continuous heads.
@@ -82,12 +86,13 @@ class RLDSBatchTransform:
 
         return_dict = dict(
             pixel_values=pixel_values,
-            future_pixel_values=future_pixel_values,
             input_ids=input_ids,
             labels=labels,
             dataset_name=dataset_name,
             actions=actions,
         )
+        if self.future_obs_window_size > 0 and len(future_imgs) > 0:
+            return_dict["future_pixel_values"] = torch.stack([self.image_transform(fimg) for fimg in future_imgs])
 
         # Add additional inputs
         if self.use_wrist_image:
@@ -99,16 +104,18 @@ class RLDSBatchTransform:
                     pixel_values_wrist = self.image_transform(img_wrist)
                     all_wrist_pixels.append(pixel_values_wrist)
 
-                    future_wrist_imgs = [
-                        Image.fromarray(rlds_batch["observation"][k][i])
-                        for i in range(1, len(rlds_batch["observation"][k]))
-                    ]
-                    future_wrist_pixels = torch.stack([self.image_transform(fimg) for fimg in future_wrist_imgs])
-                    all_future_wrist_pixels.append(future_wrist_pixels)
+                    if self.future_obs_window_size > 0:
+                        future_wrist_imgs = [
+                            Image.fromarray(rlds_batch["observation"][k][i])
+                            for i in range(1, len(rlds_batch["observation"][k]))
+                        ]
+                        future_wrist_pixels = torch.stack([self.image_transform(fimg) for fimg in future_wrist_imgs])
+                        all_future_wrist_pixels.append(future_wrist_pixels)
 
             if all_wrist_pixels:
                 return_dict["pixel_values_wrist"] = torch.stack(all_wrist_pixels)
-                return_dict["future_pixel_values_wrist"] = torch.stack(all_future_wrist_pixels)
+                if self.future_obs_window_size > 0 and all_future_wrist_pixels:
+                    return_dict["future_pixel_values_wrist"] = torch.stack(all_future_wrist_pixels)
         if self.use_proprio and "proprio" in rlds_batch["observation"]:
             proprio = rlds_batch["observation"]["proprio"]
             return_dict["proprio"] = proprio
@@ -127,6 +134,7 @@ class RLDSDataset(IterableDataset):
         shuffle_buffer_size: int = 256_000,
         train: bool = True,
         image_aug: bool = False,
+        future_obs_window_size: int = 8,
     ) -> None:
         """Lightweight wrapper around RLDS TFDS Pipeline for use with PyTorch/OpenVLA Data Loaders."""
         self.data_root_dir, self.data_mix, self.batch_transform = data_root_dir, data_mix, batch_transform
@@ -157,7 +165,7 @@ class RLDSDataset(IterableDataset):
             traj_transform_kwargs=dict(
                 window_size=1,                                      # If we wanted to feed / predict more than one step
                 future_action_window_size=NUM_ACTIONS_CHUNK-1,      # For action chunking
-                future_obs_window_size=8,                           # For JEPA future frame prediction (current + 8 future)
+                future_obs_window_size=future_obs_window_size,      # Future frame extraction for aux target
                 skip_unlabeled=True,                                # Skip trajectories without language labels
                 goal_relabeling_strategy="uniform",                 # Goals are currently unused
             ),
