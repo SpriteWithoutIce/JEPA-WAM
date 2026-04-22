@@ -24,6 +24,7 @@ json_numpy.patch()
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from prismatic.models import load_vla
 from prismatic.models.action_heads import L1RegressionActionHead
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
@@ -286,6 +287,17 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     """
     print("Instantiating pretrained VLA policy...")
 
+    ckpt_path = os.path.expanduser(str(cfg.pretrained_checkpoint))
+    if os.path.isfile(ckpt_path) and ckpt_path.endswith(".pt"):
+        vla = load_vla(
+            ckpt_path,
+            load_for_training=False,
+            llm_checkpoint_path=getattr(cfg, "llm_checkpoint_path", None),
+        )
+        vla.eval()
+        vla = vla.to(DEVICE)
+        return vla
+
     # If loading a locally stored pretrained checkpoint, check whether config or model files
     # need to be synced so that any changes the user makes to the VLA modeling code will
     # actually go into effect
@@ -411,6 +423,9 @@ def get_processor(cfg: Any) -> AutoProcessor:
     Returns:
         AutoProcessor: The model's processor
     """
+    ckpt_path = os.path.expanduser(str(cfg.pretrained_checkpoint))
+    if os.path.isfile(ckpt_path) and ckpt_path.endswith(".pt"):
+        return None
     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=False)
 
 
@@ -786,6 +801,24 @@ def get_vla_action(
             prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
         else:
             prompt = f'<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat action should the robot take to {task_label.lower()}?<|im_end|>\n<|im_start|>assistant\n'
+
+        # Native Prismatic/OpenVLA checkpoint path (runs/.../checkpoints/*.pt)
+        if processor is None and hasattr(vla, "llm_backbone"):
+            image_input = [primary_image] + all_images if all_images else primary_image
+            proprio = obs["state"] if cfg.use_proprio else None
+            if cfg.use_proprio:
+                proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
+                obs["state"] = normalize_proprio(obs["state"], proprio_norm_stats)
+                proprio = obs["state"]
+            action = vla.predict_action(
+                image=image_input,
+                instruction=task_label,
+                unnorm_key=cfg.unnorm_key,
+                proprio=proprio,
+            )
+            if action.ndim == 1:
+                action = action[None, :]
+            return [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
 
         # Process primary image
         inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)

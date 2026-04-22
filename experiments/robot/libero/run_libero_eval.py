@@ -89,6 +89,7 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    llm_checkpoint_path: Optional[str] = None        # Local LLM path (for native .pt checkpoints)
     use_l1_regression: bool = True                   # If True, uses continuous action head with L1 regression objective
     use_minivlm: bool = True                         # If True, uses minivlm
     num_diffusion_steps: int = 50                    # (When `diffusion==True`) Number of diffusion steps for inference
@@ -134,6 +135,11 @@ class GenerateConfig:
 def validate_config(cfg: GenerateConfig) -> None:
     """Validate configuration parameters."""
     assert cfg.pretrained_checkpoint is not None, "pretrained_checkpoint must not be None!"
+    ckpt_path = os.path.expanduser(str(cfg.pretrained_checkpoint))
+    assert ckpt_path.endswith(".pt") and os.path.isfile(ckpt_path), (
+        "Only native training checkpoints are supported here. "
+        "Pass a local `runs/.../checkpoints/step-xxxxxx-epoch-xx-loss=....pt` file."
+    )
 
     if "image_aug" in str(cfg.pretrained_checkpoint):
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
@@ -147,12 +153,15 @@ def validate_config(cfg: GenerateConfig) -> None:
 
 def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
+    native_pt_checkpoint = os.path.isfile(os.path.expanduser(str(cfg.pretrained_checkpoint))) and str(cfg.pretrained_checkpoint).endswith(".pt")
+
     # Load model
     model = get_model(cfg)
-    model.set_version(cfg.save_version)
+    if hasattr(model, "set_version"):
+        model.set_version(cfg.save_version)
     # Load proprio projector if needed
     proprio_projector = None
-    if cfg.use_proprio:
+    if cfg.use_proprio and not native_pt_checkpoint:
         proprio_projector = get_proprio_projector(
             cfg,
             model.llm_dim,
@@ -161,7 +170,7 @@ def initialize_model(cfg: GenerateConfig):
 
     # Load action head if needed
     action_head = None
-    if cfg.use_l1_regression:
+    if cfg.use_l1_regression and not native_pt_checkpoint:
         action_head = get_action_head(cfg, model.llm_dim)
 
     # Load noisy action projector if using diffusion
@@ -245,11 +254,11 @@ def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=
 
 def prepare_observation(obs, resize_size):
     """Prepare observation for policy input."""
-    # Get preprocessed images
+    # Keep LIBERO benchmark-side preprocessing consistent with the original evaluator.
     img = get_libero_image(obs)
     wrist_img = get_libero_wrist_image(obs)
 
-    # Resize images to size expected by model
+    # Resize images to size expected by policy evaluation pipeline.
     img_resized = resize_image_for_policy(img, resize_size)
     wrist_img_resized = resize_image_for_policy(wrist_img, resize_size)
 
@@ -492,7 +501,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     #     if 'action_queries' in name: 
     #         print(f"{name}: {param}")
 
-    # Get expected image dimensions
+    # Keep benchmark-side resize behavior unchanged.
     resize_size = get_image_resize_size(cfg)
 
     # Setup logging

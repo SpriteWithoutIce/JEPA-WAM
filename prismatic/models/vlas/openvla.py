@@ -16,6 +16,8 @@ from transformers.models.qwen2.tokenization_qwen2_fast import Qwen2TokenizerFast
 from prismatic.models.vlms.prismatic import PrismaticVLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.constants import ACTION_PROPRIO_NORMALIZATION_TYPE, ACTION_TOKEN_BEGIN_IDX
+from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -35,7 +37,12 @@ class OpenVLA(PrismaticVLM):
 
     @torch.inference_mode()
     def predict_action(
-        self, image: Union[Img, List[Img]], instruction: str, unnorm_key: Optional[str] = None, **kwargs: str
+        self,
+        image: Union[Img, List[Img]],
+        instruction: str,
+        unnorm_key: Optional[str] = None,
+        proprio: Optional[Union[np.ndarray, torch.Tensor, List[float]]] = None,
+        **kwargs: str,
     ) -> np.ndarray:
         """
         Core function for VLA inference; maps input image and task instruction to continuous action (de-tokenizes).
@@ -52,10 +59,13 @@ class OpenVLA(PrismaticVLM):
         # Build VLA Prompt
         prompt_builder = self.get_prompt_builder()
         prompt_builder.add_turn(role="human", message=f"What action should the robot take to {instruction.lower()}?")
+        prompt_builder.add_turn(role="gpt", message="")
         prompt_text = prompt_builder.get_prompt()
 
         # Prepare Inputs
-        input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(self.device)
+        tokenized = tokenizer(prompt_text, truncation=True, return_tensors="pt")
+        input_ids = tokenized.input_ids.to(self.device)
+        attention_mask = tokenized.attention_mask.to(self.device)
         if isinstance(tokenizer, LlamaTokenizerFast):
             # If the special empty token ('') does not already appear after the colon (':') token in the prompt
             # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
@@ -69,14 +79,118 @@ class OpenVLA(PrismaticVLM):
         else:
             raise ValueError(f"Unsupported `tokenizer` type = {type(tokenizer)}")
 
-        # Preprocess Image
-        pixel_values = image_transform(image)
-        if isinstance(pixel_values, torch.Tensor):
-            pixel_values = pixel_values[None, ...].to(self.device)
-        elif isinstance(pixel_values, dict):
-            pixel_values = {k: v[None, ...].to(self.device) for k, v in pixel_values.items()}
+        # Preprocess Image(s)
+        if isinstance(image, list):
+            img_tensors = [image_transform(img) for img in image]
+            if not all(isinstance(t, torch.Tensor) for t in img_tensors):
+                raise ValueError("List image transform must return Tensor for each image.")
+            pixel_values = torch.stack(img_tensors, dim=0)[None, ...].to(self.device)  # [1, V, 3, H, W]
         else:
-            raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+            pixel_values = image_transform(image)
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = pixel_values[None, ...].to(self.device)
+            elif isinstance(pixel_values, dict):
+                pixel_values = {k: v[None, ...].to(self.device) for k, v in pixel_values.items()}
+            else:
+                raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+
+        use_continuous_head = (
+            self.action_head is not None
+            and proprio is not None
+            and hasattr(self.action_head, "sample_action")
+        )
+        if use_continuous_head:
+            action_placeholder_tokens = getattr(self, "action_placeholder_tokens", 0)
+            if action_placeholder_tokens > 0:
+                placeholder_ids = torch.full(
+                    (input_ids.shape[0], action_placeholder_tokens),
+                    fill_value=ACTION_TOKEN_BEGIN_IDX,
+                    dtype=input_ids.dtype,
+                    device=input_ids.device,
+                )
+                input_ids = torch.cat([input_ids, placeholder_ids], dim=1)
+                placeholder_mask = torch.ones(
+                    (attention_mask.shape[0], action_placeholder_tokens),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([attention_mask, placeholder_mask], dim=1)
+
+            if isinstance(proprio, torch.Tensor):
+                proprio_t = proprio.to(self.device, dtype=torch.float32)
+            else:
+                proprio_t = torch.tensor(np.asarray(proprio), device=self.device, dtype=torch.float32)
+            if proprio_t.dim() == 1:
+                proprio_t = proprio_t.unsqueeze(0)
+
+            if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+                key = self._check_unnorm_key(self.norm_stats, unnorm_key)
+                proprio_norm_stats = self.norm_stats[key]["proprio"]
+                proprio_high = torch.tensor(np.array(proprio_norm_stats["q99"]), device=self.device, dtype=torch.float32)
+                proprio_low = torch.tensor(np.array(proprio_norm_stats["q01"]), device=self.device, dtype=torch.float32)
+                mask = torch.tensor(
+                    np.array(proprio_norm_stats.get("mask", np.ones_like(proprio_norm_stats["q01"], dtype=bool))),
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+                normalized_proprio = torch.where(
+                    mask,
+                    2 * (proprio_t - proprio_low) / (proprio_high - proprio_low + 1e-8) - 1,
+                    proprio_t,
+                )
+            else:
+                normalized_proprio = proprio_t
+
+            if attention_mask.dtype != torch.bool:
+                attention_mask = attention_mask.bool()
+            outputs = self(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                labels=None,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            llm_hidden = outputs["llm_hidden"]
+            hidden_states = outputs.get("llm_hidden_states", None)
+            if hidden_states is None:
+                # Fallback to only final hidden state repeated once.
+                hidden_states = (llm_hidden,)
+            task_token_count = outputs.get("task_token_count", self.vision_backbone.num_patches)
+            action_token_count = outputs.get("action_token_count", getattr(self, "action_placeholder_tokens", 0))
+            z_action = llm_hidden[:, -1, :]
+
+            if hasattr(self.action_head, "predict_action"):
+                normalized_actions = self.action_head.predict_action(
+                    z_action,
+                    normalized_proprio,
+                    hidden_states=hidden_states,
+                    task_token_count=task_token_count,
+                    action_token_count=action_token_count,
+                    phase="Inference",
+                )
+            else:
+                normalized_actions = self.action_head.sample_action(
+                    z_action,
+                    normalized_proprio,
+                )
+            normalized_actions = normalized_actions.detach().float().cpu().numpy()[0]
+
+            action_norm_stats = self.get_action_stats(unnorm_key)
+            if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
+                mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
+                action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
+            elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+                mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+                action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+            else:
+                raise ValueError("Unsupported action/proprio normalization type detected!")
+            actions = np.where(
+                mask,
+                0.5 * (normalized_actions + 1) * (action_high - action_low + 1e-8) + action_low,
+                normalized_actions,
+            )
+            return actions
 
         # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
         autocast_dtype = self.llm_backbone.half_precision_dtype

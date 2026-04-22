@@ -666,8 +666,11 @@ class PrismaticVLM(VLM):
             "loss": total_loss,
             "logits": llm_output.logits,
             "llm_hidden": llm_hidden,
+            "llm_hidden_states": llm_output.hidden_states,
             "vjepa_target": vjepa_target,
             "current_vjepa": current_vjepa,
+            "task_token_count": projected_patch_embeddings.shape[1],
+            "action_token_count": action_placeholder_tokens if llm_hidden is not None else 0,
         }
         if aux_pred is not None:
             output["aux_pred"] = aux_pred
