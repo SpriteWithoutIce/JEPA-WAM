@@ -156,7 +156,12 @@ def train(cfg: TrainConfig) -> None:
             assert int(re.search("step-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_step
             assert int(re.search("epoch-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_epoch
 
-        vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True)
+        vlm = load_vla(
+            cfg.pretrained_checkpoint,
+            hf_token=hf_token,
+            load_for_training=True,
+            llm_checkpoint_path=str(cfg.llm_checkpoint_path) if cfg.llm_checkpoint_path else None,
+        )
 
     else:
         # Try loading from registry; if not found (e.g., JEPA-VLA), build from scratch

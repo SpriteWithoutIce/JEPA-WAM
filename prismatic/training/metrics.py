@@ -93,7 +93,6 @@ class WeightsBiasesTracker:
         if self.use_wandb:
             swanlab.log(metrics, step=global_step)
 
-    @staticmethod
     def finalize(self) -> None:
         if overwatch.is_rank_zero() and self.use_wandb:
             swanlab.finish()
