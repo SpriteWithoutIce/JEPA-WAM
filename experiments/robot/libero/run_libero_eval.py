@@ -17,6 +17,10 @@ from typing import Optional, Union
 import draccus
 import numpy as np
 import tqdm
+# Add LIBERO to path before other imports
+LIBERO_PATH = os.environ.get("LIBERO_PATH", "/home/jwhe/linyihan/LIBERO")
+if LIBERO_PATH not in sys.path:
+    sys.path.insert(0, LIBERO_PATH)
 from libero.libero import benchmark
 
 import wandb

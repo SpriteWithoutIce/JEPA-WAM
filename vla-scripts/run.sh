@@ -16,7 +16,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/train.py \
     --run_root_dir "${RUNS_DIR}" \
     --vla.expected_world_size 4 \
     --vla.global_batch_size 64 \
-    --vla.per_device_batch_size 8 \
+    --vla.per_device_batch_size 16 \
     --vla.learning_rate 2e-4 \
     --vla.max_steps 60000 \
     --vla.action_head_type l1 \
@@ -28,10 +28,10 @@ torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/train.py \
     --save_interval 5000 \
     --seed 7 \
     --use_wandb True \
-    --pretrained_checkpoint /home/jwhe/linyihan/JEPA-WAM/runs/jepavla-qwen25-vjepa-224px+0_5b+mx-libero-90+n1+b4+x7--20260421_180452/checkpoints/step-030000-epoch-03-loss=0.3369.pt \
+    --pretrained_checkpoint /home/jwhe/linyihan/JEPA-WAM/runs/jepavla-qwen25-vjepa-224px+0_5b+mx-libero-90+n0+b8+x7--20260422_111024/checkpoints/step-035000-epoch-08-loss=0.2463.pt \
     --is_resume True \
-    --resume_step 30000 \
-    --resume_epoch 3 \
+    --resume_step 35000 \
+    --resume_epoch 8 \
     --vla.enable_gradient_checkpointing True \
     2>&1 | tee "${LOG_FILE}"
 echo "Log saved to: ${LOG_FILE}"
