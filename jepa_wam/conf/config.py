@@ -42,7 +42,7 @@ class ActionHeadConfig:
 @dataclass
 class AuxHeadConfig:
     """Future-frame JEPA embedding prediction head."""
-    d_aux: int = 768
+    d_aux: int = 1024
     n_heads: int = 12
     num_layers: int = 12
     ffn_ratio: int = 4

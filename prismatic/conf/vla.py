@@ -74,7 +74,7 @@ class VLAConfig(ChoiceRegistry):
     n_heads_aux: int = 12
     num_layers_aux: int = 12
     ffn_ratio_aux: int = 4
-    lambda_aux: float = 0.2
+    lambda_aux: float = 0.5
 
     # Enable Gradient/Activation Checkpointing (for the LLM Backbone)
     enable_gradient_checkpointing: bool = True      # Enable Gradient/Activation Checkpointing during Training

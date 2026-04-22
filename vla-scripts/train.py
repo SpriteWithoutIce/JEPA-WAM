@@ -130,7 +130,8 @@ def train(cfg: TrainConfig) -> None:
         cfg.run_id += f"--{cfg.run_id_note}"
     if cfg.image_aug:
         cfg.run_id += "--image_aug"
-
+    from datetime import datetime
+    cfg.run_id += f"--{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     # Start =>> Build Directories and Set Randomness
     overwatch.info('"Do or do not; there is no try."', ctx_level=1)
     hf_token = cfg.hf_token.read_text().strip() if isinstance(cfg.hf_token, Path) else os.environ[cfg.hf_token]
