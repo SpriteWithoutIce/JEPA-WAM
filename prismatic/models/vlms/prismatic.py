@@ -180,6 +180,10 @@ class PrismaticVLM(VLM):
         vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
         if "vision_backbone" in model_state_dict.keys():
             vlm.vision_backbone.load_state_dict(model_state_dict["vision_backbone"])
+        if vlm.action_head is not None and "action_head" in model_state_dict:
+            vlm.action_head.load_state_dict(model_state_dict["action_head"])
+        if vlm.aux_head is not None and "aux_head" in model_state_dict:
+            vlm.aux_head.load_state_dict(model_state_dict["aux_head"])
 
         # Freeze Weights
         if freeze_weights:

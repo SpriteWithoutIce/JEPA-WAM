@@ -136,6 +136,7 @@ def load_vla(
     step_to_load: Optional[int] = None,
     model_type: str = "pretrained",
     image_sequence_len: Optional[int] = None,
+    llm_checkpoint_path: Optional[str] = None,
 ) -> OpenVLA:
     """Loads a pretrained OpenVLA from either local disk or the HuggingFace Hub."""
 
@@ -220,10 +221,19 @@ def load_vla(
 
     # Load Vision Backbone
     overwatch.info(f"Loading Vision Backbone [bold]{model_cfg.vision_backbone_id}[/]")
+    vision_ckpt_path = vla_cfg.get("vjepa_checkpoint_path")
+    if model_cfg.vision_backbone_id.startswith("vjepa"):
+        if vision_ckpt_path is None:
+            raise ValueError(
+                "Resuming a V-JEPA based model requires `vla.vjepa_checkpoint_path` in config "
+                "or an explicit override in training config."
+            )
+        overwatch.info(f"Using V-JEPA checkpoint from config: `{vision_ckpt_path}`")
     vision_backbone, image_transform = get_vision_backbone_and_transform(
         model_cfg.vision_backbone_id,
         model_cfg.image_resize_strategy,
         image_sequence_len,
+        checkpoint_path=vision_ckpt_path,
     )
 
     # Load LLM Backbone --> note `inference_mode = True` by default when calling `load()`
@@ -233,11 +243,35 @@ def load_vla(
         llm_max_length=model_cfg.llm_max_length,
         hf_token=hf_token,
         inference_mode=not load_for_training,
+        custom_hf_path=llm_checkpoint_path,
     )
 
     # Create Action Tokenizer
     ac_tokenizer = vla_cfg["action_tokenizer"] if "action_tokenizer" in vla_cfg else "action_tokenizer"
     action_tokenizer: ActionTokenizer = ACTION_TOKENIZERS[ac_tokenizer](llm_backbone.get_tokenizer())
+
+    # Reconstruct JEPA-VLA heads with the exact training-time config when available.
+    vla_head_kwargs = {}
+    for key in (
+        "use_action_head",
+        "action_head_type",
+        "use_aux_head",
+        "d_a",
+        "n_heads_action",
+        "num_layers_action",
+        "ffn_ratio_action",
+        "beta_alpha",
+        "beta_beta",
+        "l1_use_pro_version",
+        "l1_num_blocks",
+        "d_aux",
+        "n_heads_aux",
+        "num_layers_aux",
+        "ffn_ratio_aux",
+        "lambda_aux",
+    ):
+        if key in vla_cfg:
+            vla_head_kwargs[key] = vla_cfg[key]
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
     overwatch.info(f"Loading VLA [bold blue]{model_cfg.model_id}[/] from Checkpoint")
@@ -250,6 +284,7 @@ def load_vla(
         freeze_weights=not load_for_training,
         norm_stats=norm_stats,
         action_tokenizer=action_tokenizer,
+        **vla_head_kwargs,
     )
 
     return vla

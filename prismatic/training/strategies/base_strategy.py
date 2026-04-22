@@ -360,7 +360,6 @@ class TrainingStrategy(ABC):
     ) -> None:
         """Run the VLA training loop for the given `dataset` and `collator`; log losses, action metrics to `metrics`."""
         assert isinstance(vla_dataset, IterableDataset), "VLA training expects an IterableDataset!"
-        assert self.grad_accumulation_steps == 1, "VLA training does not support gradient accumulation!"
 
         # Create a DataLoader =>> Set `num_workers` to 0; RLDS loader handles parallelism!
         dataloader = DataLoader(
@@ -388,7 +387,8 @@ class TrainingStrategy(ABC):
             # [Contract] DataLoader wraps RLDS Loader (`.as_numpy_iterator() =>> implicit `.repeat()`)
             #   => This means looping over the DataLoader is basically "infinite" (so no outer loop over epochs).
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
-            for batch in dataloader:
+            for train_idx, batch in enumerate(dataloader):
+                grad_step_ready = ((train_idx + 1) % self.grad_accumulation_steps) == 0
                 if getattr(self, "debug_batch_shapes", False) and not getattr(self, "_printed_batch_shapes", False):
                     if overwatch.is_rank_zero():
                         shape_lines = []
@@ -439,6 +439,7 @@ class TrainingStrategy(ABC):
                     isinstance(output, dict)
                     and overwatch.is_rank_zero()
                     and getattr(self, "debug_embedding_viz_interval", 0)
+                    and grad_step_ready
                     and (metrics.global_step + 1) % self.debug_embedding_viz_interval == 0
                 ):
                     self._save_embedding_visualizations(
@@ -451,7 +452,7 @@ class TrainingStrategy(ABC):
 
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
-                loss.backward()
+                (loss / self.grad_accumulation_steps).backward()
 
                 # === Action / Flow Matching Metrics ===
                 # New: log action_head loss and aux_head loss if present
@@ -481,7 +482,7 @@ class TrainingStrategy(ABC):
                         l1_loss=action_l1_loss,
                         next_actions_accuracy=next_actions_accuracy,
                         next_actions_l1_loss=next_actions_l1_loss,
-                        update_step_time=True,
+                        update_step_time=grad_step_ready,
                     )
 
                     # Compute metrics per dataset --> only on rank_zero
@@ -512,9 +513,11 @@ class TrainingStrategy(ABC):
                                     next_actions_l1_loss=next_actions_l1_loss,
                                 )
                 else:
-                    metrics.commit(update_step_time=True)
+                    metrics.commit(update_step_time=grad_step_ready)
 
                 # === Gradient Step ===
+                if not grad_step_ready:
+                    continue
 
                 # Clip Gradients --> this is custom, per-strategy because of DDP vs. FSDP locality assumptions
                 self.clip_grad_norm()
