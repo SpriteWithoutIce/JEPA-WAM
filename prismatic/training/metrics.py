@@ -316,14 +316,23 @@ class VLAMetrics:
 
     @overwatch.rank_zero_only
     def push(self) -> str:
+        def _mean_or_default(values, default: float = 0.0) -> float:
+            if len(values) == 0:
+                return default
+            first = values[0]
+            if isinstance(first, torch.Tensor):
+                return torch.stack(list(values)).mean().item()
+            return float(np.mean(list(values)))
+
         # Note :: Raw Loss is an Average over Gradient Accumulation Steps --> No Smoothing!
-        loss_raw = torch.stack(list(self.state["loss_raw"])).mean().item()
-        loss = torch.stack(list(self.state["loss"])).mean().item()
+        loss_raw = _mean_or_default(self.state["loss_raw"])
+        loss = _mean_or_default(self.state["loss"])
         # l1_loss = torch.stack(list(self.state["l1_loss"])).mean().item()
         # action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
-        loss_action = torch.stack(list(self.state["loss_action"])).mean().item()
-        loss_aux = torch.stack(list(self.state["loss_aux"])).mean().item()
-        step_time, lr = np.mean(list(self.state["step_time"])), self.state["lr"][-1]
+        loss_action = _mean_or_default(self.state["loss_action"])
+        loss_aux = _mean_or_default(self.state["loss_aux"])
+        step_time = _mean_or_default(self.state["step_time"])
+        lr = self.state["lr"][-1] if len(self.state["lr"]) > 0 else 0.0
         status = self.get_status(loss, loss_action, loss_aux)
 
         # Get metrics per dataset
