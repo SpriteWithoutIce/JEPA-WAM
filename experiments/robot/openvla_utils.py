@@ -805,11 +805,8 @@ def get_vla_action(
         # Native Prismatic/OpenVLA checkpoint path (runs/.../checkpoints/*.pt)
         if processor is None and hasattr(vla, "llm_backbone"):
             image_input = [primary_image] + all_images if all_images else primary_image
+            # Do NOT normalize proprio here; predict_action() handles normalization internally.
             proprio = obs["state"] if cfg.use_proprio else None
-            if cfg.use_proprio:
-                proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
-                obs["state"] = normalize_proprio(obs["state"], proprio_norm_stats)
-                proprio = obs["state"]
             action = vla.predict_action(
                 image=image_input,
                 instruction=task_label,
