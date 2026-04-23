@@ -36,7 +36,7 @@ from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.models.action_heads import L1RegressionActionHead
-from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+from prismatic.models.backbones.llm.prompting import PurePromptBuilder, QwenPromptBuilder
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import ProprioProjector
 from prismatic.training.train_utils import (
@@ -953,7 +953,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         action_tokenizer,
         processor.tokenizer,
         image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder,
+        prompt_builder_fn=QwenPromptBuilder,
         use_wrist_image=use_wrist_image,
         use_proprio=cfg.use_proprio,
         use_minivlm=cfg.use_minivlm
