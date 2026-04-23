@@ -11,6 +11,10 @@ from transformers import PreTrainedTokenizerBase
 from jepa_wam.conf.config import DataConfig
 
 
+# Qwen2.5 system prompt (matches QwenPromptBuilder in Prismatic)
+_QWEN_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+
+
 @dataclass
 class JEPAWBatchTransform:
     """Transform RLDS batches into dicts expected by JepaVLA."""
@@ -52,12 +56,20 @@ class JEPAWBatchTransform:
         lang = rlds_batch["task"]["language_instruction"]
         if isinstance(lang, bytes):
             lang = lang.decode("utf-8").lower()
-        prompt = self.prompt_template.format(instruction=lang)
+        user_content = self.prompt_template.format(instruction=lang)
 
-        # Tokenize (no action tokens appended — continuous action is separate)
-        tokenized = self.base_tokenizer(
-            prompt,
-            add_special_tokens=True,
+        # Use Qwen chat template so that <|im_start|>/<|im_end|> special tokens are
+        # present — without them Qwen2.5 cannot activate its instruction-following
+        # capabilities and the language conditioning has no effect on the action.
+        messages = [
+            {"role": "system", "content": _QWEN_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+        tokenized = self.base_tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
             truncation=True,
             padding=False,
             return_tensors=None,
