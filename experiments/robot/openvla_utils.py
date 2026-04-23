@@ -806,10 +806,10 @@ def get_vla_action(
         if processor is None and hasattr(vla, "llm_backbone"):
             image_input = [primary_image] + all_images if all_images else primary_image
             proprio = obs["state"] if cfg.use_proprio else None
-            if cfg.use_proprio:
-                proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
-                obs["state"] = normalize_proprio(obs["state"], proprio_norm_stats)
-                proprio = obs["state"]
+            # if cfg.use_proprio:
+            #     proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
+            #     obs["state"] = normalize_proprio(obs["state"], proprio_norm_stats)
+            #     proprio = obs["state"]
             action = vla.predict_action(
                 image=image_input,
                 instruction=task_label,

@@ -59,7 +59,7 @@ class OpenVLA(PrismaticVLM):
         # Build VLA Prompt
         prompt_builder = self.get_prompt_builder()
         prompt_builder.add_turn(role="human", message=f"What action should the robot take to {instruction.lower()}?")
-        prompt_builder.add_turn(role="gpt", message="")
+        # prompt_builder.add_turn(role="gpt", message="")
         prompt_text = prompt_builder.get_prompt()
 
         # Prepare Inputs
