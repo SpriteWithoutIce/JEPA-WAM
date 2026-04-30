@@ -37,6 +37,7 @@ from experiments.robot.libero.libero_utils import (
     save_rollout_video,
 )
 from experiments.robot.openvla_utils import (
+    _is_native_prismatic_checkpoint_path,
     get_action_head,
     get_noisy_action_projector,
     get_processor,
@@ -140,9 +141,10 @@ def validate_config(cfg: GenerateConfig) -> None:
     """Validate configuration parameters."""
     assert cfg.pretrained_checkpoint is not None, "pretrained_checkpoint must not be None!"
     ckpt_path = os.path.expanduser(str(cfg.pretrained_checkpoint))
-    assert ckpt_path.endswith(".pt") and os.path.isfile(ckpt_path), (
-        "Only native training checkpoints are supported here. "
-        "Pass a local `runs/.../checkpoints/step-xxxxxx-epoch-xx-loss=....pt` file."
+    assert os.path.exists(ckpt_path), f"Checkpoint path does not exist: {ckpt_path}"
+    assert _is_native_prismatic_checkpoint_path(ckpt_path) or os.path.isdir(ckpt_path), (
+        "Pass either a native Prismatic checkpoint `.pt`, a native export directory, "
+        "or a local HF/OpenVLA checkpoint directory."
     )
 
     if "image_aug" in str(cfg.pretrained_checkpoint):
@@ -157,7 +159,7 @@ def validate_config(cfg: GenerateConfig) -> None:
 
 def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
-    native_pt_checkpoint = os.path.isfile(os.path.expanduser(str(cfg.pretrained_checkpoint))) and str(cfg.pretrained_checkpoint).endswith(".pt")
+    native_checkpoint = _is_native_prismatic_checkpoint_path(cfg.pretrained_checkpoint)
 
     # Load model
     model = get_model(cfg)
@@ -165,7 +167,7 @@ def initialize_model(cfg: GenerateConfig):
         model.set_version(cfg.save_version)
     # Load proprio projector if needed
     proprio_projector = None
-    if cfg.use_proprio and not native_pt_checkpoint:
+    if cfg.use_proprio and not native_checkpoint:
         proprio_projector = get_proprio_projector(
             cfg,
             model.llm_dim,
@@ -174,7 +176,7 @@ def initialize_model(cfg: GenerateConfig):
 
     # Load action head if needed
     action_head = None
-    if cfg.use_l1_regression and not native_pt_checkpoint:
+    if cfg.use_l1_regression and not native_checkpoint:
         action_head = get_action_head(cfg, model.llm_dim)
 
     # Load noisy action projector if using diffusion

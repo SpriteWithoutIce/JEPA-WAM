@@ -44,6 +44,24 @@ OPENVLA_IMAGE_SIZE = 224  # Standard image size expected by OpenVLA
 np.set_printoptions(formatter={"float": lambda x: "{0:0.8f}".format(x)})
 
 
+def _is_native_prismatic_checkpoint_path(model_path: Union[str, Path]) -> bool:
+    path = Path(os.path.expanduser(str(model_path)))
+    if path.is_file() and path.suffix == ".pt":
+        return True
+    if not path.is_dir():
+        return False
+    if (path / "checkpoint-metadata.json").exists():
+        return True
+    if (path / "dataset_statistics.json").exists() and (path / "config.json").exists():
+        try:
+            with open(path / "config.json", "r") as f:
+                cfg = json.load(f)
+            return "vla" in cfg
+        except Exception:
+            return False
+    return False
+
+
 def model_is_on_hf_hub(model_path: str) -> bool:
     """Checks whether a model path points to a model on Hugging Face Hub."""
     # Local paths should never trigger a Hub lookup; otherwise each rank can block
@@ -288,7 +306,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     print("Instantiating pretrained VLA policy...")
 
     ckpt_path = os.path.expanduser(str(cfg.pretrained_checkpoint))
-    if os.path.isfile(ckpt_path) and ckpt_path.endswith(".pt"):
+    if _is_native_prismatic_checkpoint_path(ckpt_path):
         vla = load_vla(
             ckpt_path,
             load_for_training=False,
@@ -424,7 +442,7 @@ def get_processor(cfg: Any) -> AutoProcessor:
         AutoProcessor: The model's processor
     """
     ckpt_path = os.path.expanduser(str(cfg.pretrained_checkpoint))
-    if os.path.isfile(ckpt_path) and ckpt_path.endswith(".pt"):
+    if _is_native_prismatic_checkpoint_path(ckpt_path):
         return None
     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=False)
 
