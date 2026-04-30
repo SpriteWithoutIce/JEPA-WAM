@@ -38,6 +38,18 @@ overwatch = initialize_overwatch(__name__)
 IGNORE_INDEX = -100
 
 
+def _maybe_cuda_mem_snapshot(label: str):
+    if not torch.cuda.is_available():
+        return None
+    device = torch.cuda.current_device()
+    return {
+        "label": label,
+        "allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
+        "reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
+        "max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+    }
+
+
 class PrismaticVLM(VLM):
     def __init__(
         self,
@@ -526,12 +538,16 @@ class PrismaticVLM(VLM):
                 return_dict=return_dict,
             )
 
+        memory_stats = [] if getattr(self, "debug_memory_stats", False) else None
+
         # Run Visual Feature Extraction (current frames)
         with torch.set_grad_enabled(self.vision_backbone_requires_grad):
             if isinstance(pixel_values, dict):
                 patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values})
             else:
                 patch_features = self.vision_backbone(pixel_values[multimodal_indices])
+        if memory_stats is not None and (snap := _maybe_cuda_mem_snapshot("after_vision_encode")) is not None:
+            memory_stats.append(snap)
         current_vjepa = patch_features
 
         # Encode future frames for aux target (if provided)
@@ -541,6 +557,8 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim]
         projected_patch_embeddings = self.projector(patch_features)
+        if memory_stats is not None and (snap := _maybe_cuda_mem_snapshot("after_projector")) is not None:
+            memory_stats.append(snap)
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
@@ -641,6 +659,8 @@ class PrismaticVLM(VLM):
             output_hidden_states=True,
             return_dict=return_dict,
         )
+        if memory_stats is not None and (snap := _maybe_cuda_mem_snapshot("after_llm_forward")) is not None:
+            memory_stats.append(snap)
 
         # === Action Head & Aux Head Forward ===
         llm_hidden = llm_output.hidden_states[-1] if llm_output.hidden_states is not None else None
@@ -695,6 +715,8 @@ class PrismaticVLM(VLM):
                 target_n = F.layer_norm(vjepa_target, vjepa_target.shape[-1:])
                 loss_aux = F.mse_loss(pred_n, target_n)
                 total_loss = total_loss + self.lambda_aux * loss_aux
+                if memory_stats is not None and (snap := _maybe_cuda_mem_snapshot("after_aux_head")) is not None:
+                    memory_stats.append(snap)
 
         # Build Predictor output dict
         output = {
@@ -713,6 +735,8 @@ class PrismaticVLM(VLM):
             output["loss_action"] = loss_action
         if loss_aux is not None:
             output["loss_aux"] = loss_aux
+        if memory_stats is not None:
+            output["memory_stats"] = memory_stats
         return output
 
     # === GenerationMixin Methods ===

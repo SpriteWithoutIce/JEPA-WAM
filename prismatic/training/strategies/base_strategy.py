@@ -119,6 +119,28 @@ class TrainingStrategy(ABC):
     @abstractmethod
     def clip_grad_norm(self) -> None: ...
 
+    def _cuda_mem_snapshot(self, label: str) -> dict:
+        if not torch.cuda.is_available():
+            return {}
+        device = torch.cuda.current_device()
+        return {
+            "label": label,
+            "allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
+            "reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
+            "max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+        }
+
+    def _log_cuda_mem_snapshot(self, label: str, step: int) -> None:
+        if not overwatch.is_rank_zero() or not getattr(self, "debug_memory_stats", False):
+            return
+        snap = self._cuda_mem_snapshot(label)
+        if not snap:
+            return
+        overwatch.info(
+            f"[Mem][step={step:06d}] {label}: "
+            f"alloc={snap['allocated_gb']:.2f}G reserved={snap['reserved_gb']:.2f}G max={snap['max_allocated_gb']:.2f}G"
+        )
+
     def _export_vla_checkpoint_dir(self, run_dir: Path, checkpoint_path: Path, model_state_dicts: dict) -> None:
         """
         Export a VLA-Adapter-style checkpoint directory next to the native training `.pt` checkpoint.
@@ -452,6 +474,11 @@ class TrainingStrategy(ABC):
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
             for train_idx, batch in enumerate(dataloader):
                 grad_step_ready = ((train_idx + 1) % self.grad_accumulation_steps) == 0
+                should_log_memory = (
+                    getattr(self, "debug_memory_stats", False)
+                    and getattr(self, "debug_memory_stats_interval", 0) > 0
+                    and (metrics.global_step % self.debug_memory_stats_interval) == 0
+                )
                 if getattr(self, "debug_batch_shapes", False) and not getattr(self, "_printed_batch_shapes", False):
                     if overwatch.is_rank_zero():
                         shape_lines = []
@@ -498,6 +525,16 @@ class TrainingStrategy(ABC):
                         loss = output.loss
                         logits = output.logits
 
+                if should_log_memory and overwatch.is_rank_zero():
+                    self._log_cuda_mem_snapshot("after_forward", metrics.global_step)
+                    if isinstance(output, dict) and "memory_stats" in output:
+                        for entry in output["memory_stats"]:
+                            overwatch.info(
+                                f"[Mem][step={metrics.global_step:06d}] {entry['label']}: "
+                                f"alloc={entry['allocated_gb']:.2f}G reserved={entry['reserved_gb']:.2f}G "
+                                f"max={entry['max_allocated_gb']:.2f}G"
+                            )
+
                 if (
                     isinstance(output, dict)
                     and overwatch.is_rank_zero()
@@ -516,6 +553,8 @@ class TrainingStrategy(ABC):
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
                 (loss / self.grad_accumulation_steps).backward()
+                if should_log_memory and overwatch.is_rank_zero():
+                    self._log_cuda_mem_snapshot("after_backward", metrics.global_step)
 
                 # === Action / Flow Matching Metrics ===
                 # New: log action_head loss and aux_head loss if present
@@ -589,6 +628,8 @@ class TrainingStrategy(ABC):
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()
+                if should_log_memory and overwatch.is_rank_zero():
+                    self._log_cuda_mem_snapshot("after_optimizer_step", metrics.global_step + 1)
 
                 # Compute epoch value using number of completed gradient steps
                 epoch = (metrics.global_step + 1) // (len(vla_dataset) // self.global_batch_size)

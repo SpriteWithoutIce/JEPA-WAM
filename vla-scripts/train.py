@@ -232,6 +232,8 @@ class TrainConfig:
     image_aug: bool = False                                         # Whether to enable image augmentations
     use_wrist_image: bool = True                                    # Whether to include wrist camera images
     debug_batch_shapes: bool = True                                 # Print first training batch tensor shapes
+    debug_memory_stats: bool = False                                # Print CUDA memory breakdown during training
+    debug_memory_stats_interval: int = 0                            # Log memory every N optimizer steps; 0 disables
     debug_embedding_viz_interval: int = 100                         # Save JEPA embedding heatmaps every N steps; 0 disables
     debug_embedding_viz_samples: int = 1                             # Number of batch samples to visualize
     seed: int = 7                                                   # Random seed (for reproducibility)
@@ -374,6 +376,7 @@ def train(cfg: TrainConfig) -> None:
     # [Explicit] Call to `freeze_backbones` here for clarity =>> will log exactly what is/is not frozen
     overwatch.info(f"Invoking `VLM.freeze_backbones()` for `{vla_id}` => Stage: `{stage}`")
     vlm.freeze_backbones(stage)
+    vlm.debug_memory_stats = cfg.debug_memory_stats
 
     # Print number of total/trainable model parameters
     num_params = sum(p.numel() for p in vlm.parameters())
@@ -441,6 +444,8 @@ def train(cfg: TrainConfig) -> None:
         use_wandb=cfg.use_wandb
     )
     train_strategy.debug_batch_shapes = cfg.debug_batch_shapes
+    train_strategy.debug_memory_stats = cfg.debug_memory_stats
+    train_strategy.debug_memory_stats_interval = cfg.debug_memory_stats_interval
     train_strategy.debug_embedding_viz_interval = cfg.debug_embedding_viz_interval
     train_strategy.debug_embedding_viz_samples = cfg.debug_embedding_viz_samples
 
