@@ -6,9 +6,9 @@ LIBERO_DATA="/home/jwhe/linyihan/datasets/modified_libero_rlds"
 QWEN_PATH="/home/jwhe/linyihan/CKPT/Qwen2.5-0.5B"
 VJEPA_CKPT="/home/jwhe/linyihan/CKPT/vjepa2_1_vitl_384.pt"
 RUNS_DIR="./runs"
-CUDA_VISIBLE_DEVICES=2,3
+# CUDA_VISIBLE_DEVICES=2,3
 
-torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
+torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/train.py \
     --vla.type jepavla-qwen25-vjepa-224px+0_5b+mx-libero-90 \
     --vla.base_vlm /home/jwhe/linyihan/prismatic-vlm/runs/prism-qwen25-vjepa21-vitl-384px+0_5b+stage-finetune+x7 \
     --vla.data_mix libero_4_task_suites_no_noops \
@@ -16,9 +16,9 @@ torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
     --llm_checkpoint_path "${QWEN_PATH}" \
     --data_root_dir "${LIBERO_DATA}" \
     --run_root_dir ./runs \
-    --vla.expected_world_size 2 \
+    --vla.expected_world_size 4 \
     --vla.global_batch_size 64 \
-    --vla.per_device_batch_size 4 \
+    --vla.per_device_batch_size 16 \
     --vla.learning_rate 2e-4 \
     --vla.max_steps 45000 \
     --vla.shuffle_buffer_size 10000 \
@@ -33,8 +33,8 @@ torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
     --use_wrist_image False \
     --save_interval 5000 \
     --seed 7 \
-    --use_wandb False \
+    --use_wandb True \
     --debug_batch_shapes False \
-    # 2>&1 | tee "${LOG_FILE}"
-# echo "Log saved to: ${LOG_FILE}"
+    2>&1 | tee "${LOG_FILE}"
+echo "Log saved to: ${LOG_FILE}"
 
