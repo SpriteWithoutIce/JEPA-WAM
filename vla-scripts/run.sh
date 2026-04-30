@@ -16,7 +16,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
     --run_root_dir "${RUNS_DIR}" \
     --vla.expected_world_size 8 \
     --vla.global_batch_size 64 \
-    --vla.per_device_batch_size 4 \
+    --vla.per_device_batch_size 8 \
     --vla.learning_rate 2e-4 \
     --vla.max_steps 45000 \
     --vla.action_head_type l1 \
@@ -25,8 +25,8 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
     --vla.shuffle_buffer_size 10000 \
     --save_interval 5000 \
     --seed 7 \
-    --use_wandb False \
+    --use_wandb True \
     --vla.use_aux_head False \
     --vla.enable_gradient_checkpointing True \
-    # 2>&1 | tee "${LOG_FILE}"
+    2>&1 | tee "${LOG_FILE}"
 echo "Log saved to: ${LOG_FILE}"
