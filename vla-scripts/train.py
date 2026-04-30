@@ -35,6 +35,7 @@ from prismatic.util import set_global_seed
 from prismatic.vla import get_vla_dataset_and_collator
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
+from peft import LoraConfig, get_peft_model
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -44,8 +45,6 @@ overwatch = initialize_overwatch(__name__)
 
 
 def apply_lora_to_vlm(vlm, vla_cfg: VLAConfig) -> None:
-    from peft import LoraConfig, get_peft_model
-
     if hasattr(vlm.llm_backbone.llm, "peft_config"):
         overwatch.info("LLM already wrapped with LoRA; skipping re-wrap.")
         return
