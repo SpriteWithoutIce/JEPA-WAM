@@ -25,7 +25,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
     --vla.action_head_type l1 \
     --vla.future_obs_window_size 8 \
     --vla.use_aux_head True \
-    --use_wrist_image False \
+    --use_wrist_image True \
     --save_interval 5000 \
     --seed 7 \
     --use_wandb False \
