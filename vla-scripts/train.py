@@ -127,6 +127,7 @@ def build_vla_from_base_vlm(
     # while VLA heads are newly initialized for Libero training.
     vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
     vlm.projector.load_state_dict(model_state_dict["projector"])
+    vlm = vlm.to(dtype=torch.float32)
     return vlm
 
 

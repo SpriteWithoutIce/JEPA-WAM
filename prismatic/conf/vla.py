@@ -65,7 +65,7 @@ class VLAConfig(ChoiceRegistry):
     ffn_ratio_action: int = 4
     beta_alpha: float = 1.5
     beta_beta: float = 1.0
-    l1_use_pro_version: bool = True
+    l1_use_pro_version: bool = False
     l1_num_blocks: int = 24
 
     # Aux Head (Cross-Attention Decoder)
