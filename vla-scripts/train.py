@@ -56,31 +56,31 @@ def build_vla_from_base_vlm(
     """
     from prismatic.models.materialize import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform, get_vlm
 
-    base_vlm = load(
-        base_vlm_id_or_path,
-        hf_token=hf_token,
-        load_for_training=True,
-        image_sequence_len=cfg.vla.image_sequence_len,
-    )
+    if not os.path.isdir(base_vlm_id_or_path):
+        raise ValueError(
+            "JEPA-VLA training expects `vla.base_vlm` to point to a base VLM run directory "
+            "with `config.json` and `checkpoints/latest-checkpoint.pt`."
+        )
 
-    if os.path.isdir(base_vlm_id_or_path):
-        with open(Path(base_vlm_id_or_path) / "config.json", "r") as f:
-            model_cfg = json.load(f)["model"]
+    run_dir = Path(base_vlm_id_or_path)
+    with open(run_dir / "config.json", "r") as f:
+        model_cfg = json.load(f)["model"]
+
+    checkpoint_dir = run_dir / "checkpoints"
+    latest_checkpoint = checkpoint_dir / "latest-checkpoint.pt"
+    if latest_checkpoint.exists():
+        checkpoint_path = latest_checkpoint
     else:
-        from prismatic.conf import ModelConfig
+        checkpoint_candidates = sorted(checkpoint_dir.glob("step-*.pt"))
+        if not checkpoint_candidates:
+            raise ValueError(f"Could not find a base VLM checkpoint under `{checkpoint_dir}`")
+        checkpoint_path = checkpoint_candidates[-1]
 
-        model_cfg_dc = ModelConfig.get_choice_class(str(base_vlm_id_or_path))()
-        model_cfg = {
-            "model_id": model_cfg_dc.model_id,
-            "arch_specifier": model_cfg_dc.arch_specifier,
-            "vision_backbone_id": model_cfg_dc.vision_backbone_id,
-            "llm_backbone_id": model_cfg_dc.llm_backbone_id,
-            "image_resize_strategy": model_cfg_dc.image_resize_strategy,
-            "llm_max_length": model_cfg_dc.llm_max_length,
-            "image_sequence_len": model_cfg_dc.image_sequence_len,
-            "vision_checkpoint_path": getattr(model_cfg_dc, "vision_checkpoint_path", None),
-            "llm_local_path": getattr(model_cfg_dc, "llm_local_path", None),
-        }
+    model_state_dict = torch.load(checkpoint_path, map_location="cpu")["model"]
+    if "llm_backbone" not in model_state_dict or "projector" not in model_state_dict:
+        raise ValueError(
+            f"Base VLM checkpoint `{checkpoint_path}` must contain `llm_backbone` and `projector` weights."
+        )
 
     vision_checkpoint_path = cfg.vla.vjepa_checkpoint_path or model_cfg.get("vision_checkpoint_path")
     llm_checkpoint_path = str(cfg.llm_checkpoint_path) if cfg.llm_checkpoint_path else model_cfg.get("llm_local_path")
@@ -122,9 +122,11 @@ def build_vla_from_base_vlm(
         lambda_aux=cfg.vla.lambda_aux,
     )
 
-    vlm.vision_backbone.load_state_dict(base_vlm.vision_backbone.state_dict())
-    vlm.llm_backbone.load_state_dict(base_vlm.llm_backbone.state_dict())
-    vlm.projector.load_state_dict(base_vlm.projector.state_dict())
+    # The base run only provides pretrained projector + LLM weights.
+    # Vision weights should come from the explicit V-JEPA checkpoint path above,
+    # while VLA heads are newly initialized for Libero training.
+    vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
+    vlm.projector.load_state_dict(model_state_dict["projector"])
     return vlm
 
 
