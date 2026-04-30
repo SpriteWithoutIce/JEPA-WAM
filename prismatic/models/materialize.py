@@ -19,6 +19,7 @@ from prismatic.models.backbones.vision import (
     ImageTransform,
     IN1KViTBackbone,
     SigLIPViTBackbone,
+    VJEPA21ViTBackbone,
     VJEPAVisionBackbone,
     VisionBackbone,
 )
@@ -52,6 +53,10 @@ VISION_BACKBONES = {
 
     # === V-JEPA Backbone ===
     "vjepa-vit-l": {"cls": VJEPAVisionBackbone, "kwargs": {"default_image_size": 224, "checkpoint_path": None}},
+    "vjepa2_1-vit-b-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
+    "vjepa2_1-vit-l-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
+    "vjepa2_1-vit-g-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
+    "vjepa2_1-vit-G-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
 }
 
 

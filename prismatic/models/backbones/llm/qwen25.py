@@ -43,22 +43,20 @@ class Qwen25LLMBackbone(HFCausalLLMBackbone):
         self,
         llm_backbone_id: str,
         llm_max_length: int = 2048,
+        llm_path: Optional[str] = None,
         hf_token: Optional[str] = None,
         inference_mode: bool = False,
         use_flash_attention_2: bool = True,
         num_extra_tokens: int = 0,
-        custom_hf_path: Optional[str] = None,
     ) -> None:
-        kwargs = dict(QWEN25_MODELS[llm_backbone_id])
-        if custom_hf_path is not None:
-            kwargs["hf_hub_path"] = custom_hf_path
         super().__init__(
             llm_backbone_id,
+            llm_path=llm_path,
             llm_max_length=llm_max_length,
             hf_token=hf_token,
             inference_mode=inference_mode,
             use_flash_attention_2=use_flash_attention_2,
-            **kwargs,
+            **QWEN25_MODELS[llm_backbone_id],
         )
 
         # add some more special tokens

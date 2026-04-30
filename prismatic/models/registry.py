@@ -710,6 +710,71 @@ MODEL_REGISTRY = {
             "train_epochs": 1,
         }
     },
+    "prism-qwen25-vjepa21-384px+0_5b": {
+        "model_id": "prism-qwen25-vjepa21-384px+0_5b",
+        "names": ["Prism V-JEPA2.1 384px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "V-JEPA 2.1 384px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "V-JEPA 2.1 ViT-L @ 384px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct"],
+            "train_epochs": 2,
+        }
+    },
+    "prism-qwen25-vjepa21-vitb-384px+0_5b": {
+        "model_id": "prism-qwen25-vjepa21-vitb-384px+0_5b",
+        "names": ["Prism V-JEPA2.1 ViT-B 384px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "V-JEPA 2.1 ViT-B 384px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "V-JEPA 2.1 ViT-B @ 384px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct"],
+            "train_epochs": 2,
+        }
+    },
+    "prism-qwen25-vjepa21-vitl-384px+0_5b": {
+        "model_id": "prism-qwen25-vjepa21-vitl-384px+0_5b",
+        "names": ["Prism V-JEPA2.1 ViT-L 384px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "V-JEPA 2.1 ViT-L 384px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "V-JEPA 2.1 ViT-L @ 384px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct"],
+            "train_epochs": 2,
+        }
+    },
+    "prism-qwen25-vjepa21-vitg-384px+0_5b": {
+        "model_id": "prism-qwen25-vjepa21-vitg-384px+0_5b",
+        "names": ["Prism V-JEPA2.1 ViT-g 384px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "V-JEPA 2.1 ViT-g 384px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "V-JEPA 2.1 ViT-g @ 384px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct"],
+            "train_epochs": 2,
+        }
+    },
+    "prism-qwen25-vjepa21-vitG-384px+0_5b": {
+        "model_id": "prism-qwen25-vjepa21-vitG-384px+0_5b",
+        "names": ["Prism V-JEPA2.1 ViT-G 384px w/ Qwen2.5 0.5B"],
+        "description": {
+            "name": "V-JEPA 2.1 ViT-G 384px Qwen2.5 0.5B",
+            "optimization_procedure": "single-stage",
+            "visual_representation": "V-JEPA 2.1 ViT-G @ 384px",
+            "image_processing": "Naive Resize",
+            "language_model": "Qwen2.5 0.5B",
+            "datasets": ["LLaVa v1.5 Instruct"],
+            "train_epochs": 2,
+        }
+    },
 
 }
 

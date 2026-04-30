@@ -1,167 +1,177 @@
 """
 vjepa_vit.py
 
-Vision backbone using V-JEPA 2.1 encoder for spatial-temporal feature extraction.
-Replaces DinoSigLIP in the Prismatic VLA framework.
+V-JEPA 2.1 vision backbone wrapper for Prismatic. This keeps the underlying
+encoder architecture aligned with the AlphaBrain implementation and only adapts
+it to the local VisionBackbone interface.
 """
 
+import os
 from functools import partial
-from typing import Callable, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
-import torch.nn as nn
-from PIL.Image import Image
-from torch.distributed.fsdp.wrap import _module_wrap_policy
-from torchvision.transforms import Compose, Normalize, Resize, ToTensor
+from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy, transformer_auto_wrap_policy
+from torchvision.transforms import Compose, InterpolationMode, Normalize, Resize, ToTensor
 
 from prismatic.models.backbones.vision.base_vision import ImageTransform, VisionBackbone
+from prismatic.models.backbones.vision.vjepa import Block, VisionTransformer
+from prismatic.models.backbones.vision.vjepa import vision_transformer as vit_module
 
-# Lazy import to avoid hard dependency
-_VJEPA_ENCODER_CLS = None
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+_CHECKPOINT_KEYS = ("target_encoder", "ema_encoder", "encoder")
+
+VJEPA_VISION_BACKBONES: Dict[str, Dict[str, object]] = {
+    "vjepa2_1-vit-b-384px": {
+        "model_size": "vjepa2_1_vit_base",
+        "factory": "vit_base",
+        "embed_dim": 768,
+        "default_image_size": 384,
+    },
+    "vjepa2_1-vit-l-384px": {
+        "model_size": "vjepa2_1_vit_large",
+        "factory": "vit_large",
+        "embed_dim": 1024,
+        "default_image_size": 384,
+    },
+    "vjepa2_1-vit-g-384px": {
+        "model_size": "vjepa2_1_vit_giant",
+        "factory": "vit_giant_xformers",
+        "embed_dim": 1408,
+        "default_image_size": 384,
+    },
+    "vjepa2_1-vit-G-384px": {
+        "model_size": "vjepa2_1_vit_gigantic",
+        "factory": "vit_gigantic_xformers",
+        "embed_dim": 1664,
+        "default_image_size": 384,
+    },
+}
 
 
-def _get_vjepa_encoder_cls():
-    global _VJEPA_ENCODER_CLS
-    if _VJEPA_ENCODER_CLS is None:
-        from vjepa21.extractor import VJEPA21Encoder
-        _VJEPA_ENCODER_CLS = VJEPA21Encoder
-    return _VJEPA_ENCODER_CLS
+def _clean_state_dict(state_dict: dict) -> dict:
+    cleaned = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("module.", "").replace("backbone.", "")
+        cleaned[new_key] = value
+    return cleaned
 
 
-class VJEPAImageTransform:
-    """ImageNet normalization transform for V-JEPA."""
-
-    def __init__(self, image_size: int = 224) -> None:
-        self.image_size = image_size
-        self.transform = Compose([
-            Resize((image_size, image_size)),
-            ToTensor(),
-            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-
-    def __call__(self, img: Image, **kwargs) -> torch.Tensor:
-        return self.transform(img.convert("RGB"))
+def _extract_encoder_state_dict(checkpoint: dict) -> dict:
+    for key in _CHECKPOINT_KEYS:
+        if key in checkpoint:
+            return _clean_state_dict(checkpoint[key])
+    return _clean_state_dict(checkpoint)
 
 
-class VJEPAVisionBackbone(VisionBackbone):
-    """V-JEPA 2.1 Vision Backbone.
-
-    Forward input:  [B, V, 3, H, W]  (current frame, multi-view)
-    Forward output: [B, V*196, 1024]
-
-    Future encoding: [B, V, 8, 3, H, W] -> [B, V, 4, 14, 14, 1024]
-    """
-
+class VJEPA21ViTBackbone(VisionBackbone):
     def __init__(
         self,
         vision_backbone_id: str,
         image_resize_strategy: str,
-        default_image_size: int = 224,
-        image_sequence_len: int = 1,
-        checkpoint_path: str = "pretrained_models/vjepa2_1_vitl.pt",
-        model_name: str = "vit_large",
+        default_image_size: int = 384,
+        checkpoint_path: Optional[str] = None,
+        patch_size: int = 16,
+        num_frames: int = 16,
+        tubelet_size: int = 2,
+        use_rope: bool = True,
+        interpolate_rope: bool = True,
+        freeze_backbone: bool = True,
     ) -> None:
-        super().__init__(
-            vision_backbone_id,
-            image_resize_strategy,
-            default_image_size=default_image_size,
-            image_sequence_len=image_sequence_len,
+        if vision_backbone_id not in VJEPA_VISION_BACKBONES:
+            raise ValueError(f"V-JEPA backbone `{vision_backbone_id}` is not supported!")
+
+        cfg = VJEPA_VISION_BACKBONES[vision_backbone_id]
+        default_image_size = int(cfg["default_image_size"])
+        super().__init__(vision_backbone_id, image_resize_strategy, default_image_size=default_image_size)
+
+        self.patch_size = patch_size
+        self.num_frames = num_frames
+        self.tubelet_size = tubelet_size
+        self.use_rope = use_rope
+        self.interpolate_rope = interpolate_rope
+        self.freeze_backbone = freeze_backbone
+        self._embed_dim = int(cfg["embed_dim"])
+        self.checkpoint_path = checkpoint_path or os.environ.get("VJEPA_CHECKPOINT_PATH")
+
+        factory_name = str(cfg["factory"])
+        factory_fn = getattr(vit_module, factory_name)
+        encoder_kwargs = dict(
+            patch_size=patch_size,
+            img_size=(self.default_image_size, self.default_image_size),
+            num_frames=num_frames,
+            tubelet_size=tubelet_size,
+            use_sdpa=True,
+            use_silu=False,
+            wide_silu=True,
+            uniform_power=False,
+            use_rope=use_rope,
+            img_temporal_dim_size=1,
+            interpolate_rope=interpolate_rope,
         )
-        self.checkpoint_path = checkpoint_path
-        self.vjepa_model_name = model_name
-        self.dtype = torch.bfloat16
+        self.featurizer: VisionTransformer = factory_fn(**encoder_kwargs)
 
-        # Initialize V-JEPA encoder with num_frames=8 (RoPE handles variable length)
-        VJEPA21Encoder = _get_vjepa_encoder_cls()
-        self.encoder = VJEPA21Encoder(
-            checkpoint_path=checkpoint_path,
-            model_name=model_name,
-            img_size=default_image_size,
-            num_frames=8,
-            device="cpu",  # will be moved dynamically
+        if self.checkpoint_path is not None:
+            self._load_weights(self.checkpoint_path)
+
+        self.featurizer = self.featurizer.to(dtype=torch.bfloat16)
+        if self.freeze_backbone:
+            self.featurizer.requires_grad_(False)
+            self.featurizer.eval()
+
+        if self.image_resize_strategy not in {"resize-naive", "resize-crop"}:
+            raise ValueError(
+                f"Image Resize Strategy `{self.image_resize_strategy}` is not supported for V-JEPA. "
+                "Use `resize-naive` to preserve AlphaBrain preprocessing behavior."
+            )
+        self.image_transform = Compose(
+            [
+                Resize((self.default_image_size, self.default_image_size), interpolation=InterpolationMode.BICUBIC),
+                ToTensor(),
+                Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
         )
-        # Freeze by default (configurable via freeze_backbones stage)
-        for p in self.encoder.model.parameters():
-            p.requires_grad = False
-        self.encoder.model.eval()
 
-        self._embed_dim = self.encoder.embed_dim  # 1024 for ViT-L
+    def _load_weights(self, checkpoint_path: str) -> None:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        encoder_sd = _extract_encoder_state_dict(checkpoint)
+        missing, unexpected = self.featurizer.load_state_dict(encoder_sd, strict=False)
 
-        # Image transform
-        self.image_transform = VJEPAImageTransform(image_size=default_image_size)
-
-    def _ensure_device(self, target_device: torch.device) -> None:
-        model_device = next(self.encoder.model.parameters()).device
-        if model_device != target_device:
-            self.encoder.model = self.encoder.model.to(target_device)
-            self.encoder.device = target_device
-
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Encode current-frame images.
-
-        Args:
-            pixel_values: [B, V, 3, H, W] or [B, 3, H, W]
-        Returns:
-            [B, V*196, D_jepa]
-        """
-        self._ensure_device(pixel_values.device)
-        if pixel_values.ndim == 4:
-            pixel_values = pixel_values.unsqueeze(1)  # [B, 1, C, H, W]
-        B, V, C, H, W = pixel_values.shape
-
-        # Duplicate frame to satisfy T>=2 requirement
-        x = pixel_values.unsqueeze(2).repeat(1, 1, 2, 1, 1, 1)  # [B, V, 2, C, H, W]
-        x = x.reshape(B * V, 2, C, H, W)
-
-        with torch.no_grad():
-            emb = self.encoder.extract(x, return_type="all_tokens")  # [B*V, 196, D]
-
-        emb = emb.reshape(B, V, 196, -1)  # [B, V, 196, D]
-        emb = emb.reshape(B, V * 196, -1)  # [B, V*196, D]
-        return emb
-
-    def encode_future(self, future_pixel_values: torch.Tensor) -> torch.Tensor:
-        """Encode future-frame images (for aux head supervision).
-
-        Args:
-            future_pixel_values: [B, V, 8, 3, H, W] or [B, 8, 3, H, W]
-        Returns:
-            [B, V, 4, 14, 14, D_jepa]
-        """
-        self._ensure_device(future_pixel_values.device)
-        if future_pixel_values.ndim == 5:
-            future_pixel_values = future_pixel_values.unsqueeze(1)  # [B, 1, T, C, H, W]
-        B, V, T, C, H, W = future_pixel_values.shape
-
-        x = future_pixel_values.reshape(B * V, T, C, H, W)  # [B*V, 8, 3, H, W]
-
-        with torch.no_grad():
-            emb = self.encoder.extract(x, return_type="all_tokens")  # [B*V, 784, D]
-
-        # 784 = 4 * 14 * 14  (T/2=4 temporal tokens, 14*14=196 spatial per timestep)
-        emb = emb.reshape(B, V, 4, 14, 14, -1)
-        return emb.detach()
-
-    def get_image_transform(self) -> ImageTransform:
-        return self.image_transform
+        non_trivial_missing = [key for key in missing if "pos_embed" not in key]
+        if non_trivial_missing:
+            raise ValueError(f"Missing non-positional keys when loading V-JEPA checkpoint: {non_trivial_missing}")
+        if unexpected:
+            raise ValueError(f"Unexpected keys when loading V-JEPA checkpoint: {unexpected}")
 
     def get_fsdp_wrapping_policy(self) -> Callable:
-        # V-JEPA encoder is frozen; simple policy wrapping the whole encoder
-        return partial(_module_wrap_policy, module_classes={type(self.encoder.model)})
+        vit_wrap_policy = partial(_module_wrap_policy, module_classes={VisionTransformer})
+        transformer_block_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={Block})
+        return partial(_or_policy, policies=[vit_wrap_policy, transformer_block_policy])
 
-    @property
-    def embed_dim(self) -> int:
-        return self._embed_dim
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        if pixel_values.ndim != 4:
+            raise ValueError(f"Expected image tensor of shape [B, 3, H, W], got {tuple(pixel_values.shape)}")
+
+        x = pixel_values.unsqueeze(2)
+        x = x.to(device=next(self.featurizer.parameters()).device, dtype=next(self.featurizer.parameters()).dtype)
+        out = self.featurizer(x)
+        if isinstance(out, list):
+            out = out[-1]
+        return out
 
     @property
     def default_image_resolution(self) -> Tuple[int, int, int]:
         return (3, self.default_image_size, self.default_image_size)
 
     @property
+    def embed_dim(self) -> int:
+        return self._embed_dim
+
+    @property
     def num_patches(self) -> int:
-        # 196 patches per view (14x14)
-        return 196 * self.image_sequence_len
+        return (self.default_image_size // self.patch_size) ** 2
 
     @property
     def half_precision_dtype(self) -> torch.dtype:
-        return self.dtype
+        return torch.bfloat16

@@ -62,7 +62,15 @@ def load(
         overwatch.info(f"Loading from local path `{(run_dir := Path(model_id_or_path))}`")
 
         # Get paths for `config.json` and pretrained checkpoint
-        config_json, checkpoint_pt = run_dir / "config.json", run_dir / "checkpoints" / "step-020792-epoch-01-loss=0.5268.pt"
+        config_json = run_dir / "config.json"
+        checkpoint_dir = run_dir / "checkpoints"
+        latest_checkpoint = checkpoint_dir / "latest-checkpoint.pt"
+        if latest_checkpoint.exists():
+            checkpoint_pt = latest_checkpoint
+        else:
+            checkpoint_candidates = sorted(checkpoint_dir.glob("step-*.pt"))
+            assert checkpoint_candidates, f"Missing checkpoint under `{checkpoint_dir}`"
+            checkpoint_pt = checkpoint_candidates[-1]
         assert config_json.exists(), f"Missing `config.json` for `{run_dir = }`"
         assert checkpoint_pt.exists(), f"Missing checkpoint for `{run_dir = }`"
     else:
@@ -91,17 +99,15 @@ def load(
     )
 
     if image_sequence_len is None:
-        if hasattr(model_cfg, "image_sequence_len"):
-            image_sequence_len = model_cfg.image_sequence_len
-        else:
-            image_sequence_len = 1
+        image_sequence_len = model_cfg.get("image_sequence_len", 1)
 
     # Load Vision Backbone
     overwatch.info(f"Loading Vision Backbone [bold]{model_cfg['vision_backbone_id']}[/]")
     vision_backbone, image_transform = get_vision_backbone_and_transform(
         model_cfg["vision_backbone_id"],
         model_cfg["image_resize_strategy"],
-        image_sequence_len
+        image_sequence_len,
+        checkpoint_path=model_cfg.get("vision_checkpoint_path"),
     )
 
     # Load LLM Backbone --> note `inference_mode = True` by default when calling `load()`
@@ -111,6 +117,7 @@ def load(
         llm_max_length=model_cfg.get("llm_max_length", 2048),
         hf_token=hf_token,
         inference_mode=not load_for_training,
+        custom_hf_path=model_cfg.get("llm_local_path"),
     )
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)

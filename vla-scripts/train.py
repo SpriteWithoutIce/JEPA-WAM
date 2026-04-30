@@ -43,6 +43,91 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 overwatch = initialize_overwatch(__name__)
 
 
+def build_vla_from_base_vlm(
+    base_vlm_id_or_path: Union[str, Path],
+    cfg: "TrainConfig",
+    hf_token: Optional[str],
+):
+    """
+    Load a base Prismatic VLM checkpoint, then rebuild it with JEPA-VLA heads attached.
+
+    This is the right path when we start from a pretrained base VLM run directory
+    and want to train a fresh VLA head stack (e.g. L1 regression head on Libero).
+    """
+    from prismatic.models.materialize import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform, get_vlm
+
+    base_vlm = load(
+        base_vlm_id_or_path,
+        hf_token=hf_token,
+        load_for_training=True,
+        image_sequence_len=cfg.vla.image_sequence_len,
+    )
+
+    if os.path.isdir(base_vlm_id_or_path):
+        with open(Path(base_vlm_id_or_path) / "config.json", "r") as f:
+            model_cfg = json.load(f)["model"]
+    else:
+        from prismatic.conf import ModelConfig
+
+        model_cfg_dc = ModelConfig.get_choice_class(str(base_vlm_id_or_path))()
+        model_cfg = {
+            "model_id": model_cfg_dc.model_id,
+            "arch_specifier": model_cfg_dc.arch_specifier,
+            "vision_backbone_id": model_cfg_dc.vision_backbone_id,
+            "llm_backbone_id": model_cfg_dc.llm_backbone_id,
+            "image_resize_strategy": model_cfg_dc.image_resize_strategy,
+            "llm_max_length": model_cfg_dc.llm_max_length,
+            "image_sequence_len": model_cfg_dc.image_sequence_len,
+            "vision_checkpoint_path": getattr(model_cfg_dc, "vision_checkpoint_path", None),
+            "llm_local_path": getattr(model_cfg_dc, "llm_local_path", None),
+        }
+
+    vision_checkpoint_path = cfg.vla.vjepa_checkpoint_path or model_cfg.get("vision_checkpoint_path")
+    llm_checkpoint_path = str(cfg.llm_checkpoint_path) if cfg.llm_checkpoint_path else model_cfg.get("llm_local_path")
+
+    vision_backbone, _ = get_vision_backbone_and_transform(
+        model_cfg["vision_backbone_id"],
+        model_cfg["image_resize_strategy"],
+        cfg.vla.image_sequence_len,
+        checkpoint_path=vision_checkpoint_path,
+    )
+    llm_backbone, _ = get_llm_backbone_and_tokenizer(
+        model_cfg["llm_backbone_id"],
+        llm_max_length=model_cfg.get("llm_max_length", 2048),
+        hf_token=hf_token,
+        inference_mode=False,
+        custom_hf_path=llm_checkpoint_path,
+    )
+    vlm = get_vlm(
+        model_cfg["model_id"],
+        model_cfg["arch_specifier"],
+        vision_backbone,
+        llm_backbone,
+        enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training,
+        use_action_head=cfg.vla.use_action_head,
+        action_head_type=cfg.vla.action_head_type,
+        use_aux_head=cfg.vla.use_aux_head,
+        d_a=cfg.vla.d_a,
+        n_heads_action=cfg.vla.n_heads_action,
+        num_layers_action=cfg.vla.num_layers_action,
+        ffn_ratio_action=cfg.vla.ffn_ratio_action,
+        beta_alpha=cfg.vla.beta_alpha,
+        beta_beta=cfg.vla.beta_beta,
+        l1_use_pro_version=cfg.vla.l1_use_pro_version,
+        l1_num_blocks=cfg.vla.l1_num_blocks,
+        d_aux=cfg.vla.d_aux,
+        n_heads_aux=cfg.vla.n_heads_aux,
+        num_layers_aux=cfg.vla.num_layers_aux,
+        ffn_ratio_aux=cfg.vla.ffn_ratio_aux,
+        lambda_aux=cfg.vla.lambda_aux,
+    )
+
+    vlm.vision_backbone.load_state_dict(base_vlm.vision_backbone.state_dict())
+    vlm.llm_backbone.load_state_dict(base_vlm.llm_backbone.state_dict())
+    vlm.projector.load_state_dict(base_vlm.projector.state_dict())
+    return vlm
+
+
 @dataclass
 class TrainConfig:
     # fmt: off
@@ -164,51 +249,20 @@ def train(cfg: TrainConfig) -> None:
         )
 
     else:
-        # Try loading from registry; if not found (e.g., JEPA-VLA), build from scratch
-        try:
-            vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
-        except (ValueError, Exception) as e:
-            overwatch.info(f"Base VLM `{cfg.vla.base_vlm}` load failed ({type(e).__name__}); building from scratch for JEPA-VLA")
-            from prismatic.conf import ModelConfig
-            from prismatic.models.materialize import get_vision_backbone_and_transform, get_llm_backbone_and_tokenizer, get_vlm
-
-            model_cfg = ModelConfig.get_choice_class(str(cfg.vla.base_vlm))()
-            vision_backbone, image_transform = get_vision_backbone_and_transform(
-                model_cfg.vision_backbone_id,
-                model_cfg.image_resize_strategy,
-                model_cfg.image_sequence_len,
-                checkpoint_path=cfg.vla.vjepa_checkpoint_path,
+        # For JEPA-VLA training we want a base VLM checkpoint plus fresh VLA heads.
+        if cfg.vla.use_action_head or cfg.vla.use_aux_head:
+            overwatch.info(
+                f"Rebuilding base VLM `{cfg.vla.base_vlm}` with JEPA-VLA heads "
+                f"(action_head_type={cfg.vla.action_head_type}, use_aux_head={cfg.vla.use_aux_head})"
             )
-            llm_backbone, tokenizer = get_llm_backbone_and_tokenizer(
-                model_cfg.llm_backbone_id,
-                llm_max_length=model_cfg.llm_max_length,
+            vlm = build_vla_from_base_vlm(cfg.vla.base_vlm, cfg, hf_token)
+        else:
+            # Fallback: plain Prismatic VLM without JEPA-VLA heads.
+            vlm = load(
+                cfg.vla.base_vlm,
                 hf_token=hf_token,
-                inference_mode=False,
-                custom_hf_path=str(cfg.llm_checkpoint_path) if cfg.llm_checkpoint_path else None,
-            )
-            vlm = get_vlm(
-                model_cfg.model_id,
-                model_cfg.arch_specifier,
-                vision_backbone,
-                llm_backbone,
-                enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training,
-                # Pass JEPA-VLA head hyperparameters
-                use_action_head=cfg.vla.use_action_head,
-                action_head_type=cfg.vla.action_head_type,
-                use_aux_head=cfg.vla.use_aux_head,
-                d_a=cfg.vla.d_a,
-                n_heads_action=cfg.vla.n_heads_action,
-                num_layers_action=cfg.vla.num_layers_action,
-                ffn_ratio_action=cfg.vla.ffn_ratio_action,
-                beta_alpha=cfg.vla.beta_alpha,
-                beta_beta=cfg.vla.beta_beta,
-                l1_use_pro_version=cfg.vla.l1_use_pro_version,
-                l1_num_blocks=cfg.vla.l1_num_blocks,
-                d_aux=cfg.vla.d_aux,
-                n_heads_aux=cfg.vla.n_heads_aux,
-                num_layers_aux=cfg.vla.num_layers_aux,
-                ffn_ratio_aux=cfg.vla.ffn_ratio_aux,
-                lambda_aux=cfg.vla.lambda_aux,
+                load_for_training=True,
+                image_sequence_len=cfg.vla.image_sequence_len,
             )
 
     # [Validate] Model should be in Full Precision!
