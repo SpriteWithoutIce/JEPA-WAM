@@ -163,6 +163,43 @@ def build_vla_from_base_vlm(
     return vlm
 
 
+def log_module_parameter_breakdown(vlm) -> None:
+    def summarize_module(module) -> tuple[int, int]:
+        total = sum(param.numel() for param in module.parameters())
+        trainable = sum(param.numel() for param in module.parameters() if param.requires_grad)
+        return total, trainable
+
+    module_specs = [
+        ("vision_backbone", getattr(vlm, "vision_backbone", None)),
+        ("projector", getattr(vlm, "projector", None)),
+        ("llm_backbone", getattr(vlm, "llm_backbone", None)),
+        ("action_head", getattr(vlm, "action_head", None)),
+        ("aux_head", getattr(vlm, "aux_head", None)),
+    ]
+
+    lines = ["Module Parameter Breakdown:"]
+    for name, module in module_specs:
+        if module is None:
+            continue
+        total, trainable = summarize_module(module)
+        lines.append(
+            f"  - {name}: total={total / 10**6:.3f}M, trainable={trainable / 10**6:.3f}M"
+        )
+
+    llm_module = getattr(getattr(vlm, "llm_backbone", None), "llm", None)
+    if llm_module is not None and hasattr(llm_module, "named_parameters"):
+        lora_total = sum(param.numel() for name, param in llm_module.named_parameters() if "lora_" in name)
+        lora_trainable = sum(
+            param.numel() for name, param in llm_module.named_parameters() if "lora_" in name and param.requires_grad
+        )
+        if lora_total > 0:
+            lines.append(
+                f"  - llm_lora: total={lora_total / 10**6:.3f}M, trainable={lora_trainable / 10**6:.3f}M"
+            )
+
+    overwatch.info("\n".join(lines))
+
+
 @dataclass
 class TrainConfig:
     # fmt: off
@@ -344,6 +381,7 @@ def train(cfg: TrainConfig) -> None:
     overwatch.info(
         f"# Parameters (in millions): {num_params / 10**6:.3f} Total, {num_trainable_params / 10**6:.3f} Trainable"
     )
+    log_module_parameter_breakdown(vlm)
 
     # Get VLA Dataset & Collator
     overwatch.info(f"Creating VLA Open-X Dataset with Mixture `{cfg.vla.data_mix}`")

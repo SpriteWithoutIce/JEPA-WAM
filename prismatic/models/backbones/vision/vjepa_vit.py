@@ -204,7 +204,7 @@ class VJEPA21ViTBackbone(VisionBackbone):
             )
 
         if num_views == 1:
-            return out.reshape(batch_size, temporal_tokens, spatial_side, spatial_side, out.shape[-1]).detach()
+            return out.reshape(batch_size, 1, temporal_tokens, spatial_side, spatial_side, out.shape[-1]).detach()
 
         return out.reshape(
             batch_size, num_views, temporal_tokens, spatial_side, spatial_side, out.shape[-1]
