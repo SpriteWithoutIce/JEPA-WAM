@@ -2,31 +2,33 @@ LOG_DIR="./logs"
 mkdir -p "${LOG_DIR}"
 
 LOG_FILE="${LOG_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
-LIBERO_DATA="/mnt/data/linyihan/datasets/modified_libero_rlds"
-QWEN_PATH="/mnt/data/linyihan/ckpt/Qwen2.5-0.5B"
-VJEPA_CKPT="/mnt/data/linyihan/ckpt/vjepa2-vitl-fpc64-256"
+LIBERO_DATA="/home/jwhe/linyihan/datasets/modified_libero_rlds"
+QWEN_PATH="/home/jwhe/linyihan/CKPT/Qwen2.5-0.5B"
+VJEPA_CKPT="/home/jwhe/linyihan/CKPT/vjepa2_1_vitl_384.pt"
 RUNS_DIR="./runs"
+CUDA_VISIBLE_DEVICES=2,3
 
-torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/train.py \
+torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
     --vla.type jepavla-qwen25-vjepa-224px+0_5b+mx-libero-90 \
+    --vla.base_vlm /home/jwhe/linyihan/prismatic-vlm/runs/prism-qwen25-vjepa21-vitl-384px+0_5b+stage-finetune+x7 \
     --vla.data_mix libero_4_task_suites_no_noops \
     --vla.vjepa_checkpoint_path "${VJEPA_CKPT}" \
     --llm_checkpoint_path "${QWEN_PATH}" \
     --data_root_dir "${LIBERO_DATA}" \
-    --run_root_dir "${RUNS_DIR}" \
-    --vla.expected_world_size 8 \
+    --run_root_dir ./runs \
+    --vla.expected_world_size 2 \
     --vla.global_batch_size 64 \
-    --vla.per_device_batch_size 8 \
+    --vla.per_device_batch_size 16 \
     --vla.learning_rate 2e-4 \
     --vla.max_steps 45000 \
-    --vla.action_head_type l1 \
-    --use_wrist_image True \
-    --debug_batch_shapes False \
     --vla.shuffle_buffer_size 10000 \
+    --vla.action_head_type l1 \
+    --vla.use_aux_head True \
+    --use_wrist_image True \
     --save_interval 5000 \
     --seed 7 \
-    --use_wandb True \
-    --vla.use_aux_head False \
-    --vla.enable_gradient_checkpointing True \
-    2>&1 | tee "${LOG_FILE}"
-echo "Log saved to: ${LOG_FILE}"
+    --use_wandb False \
+    --debug_batch_shapes False \
+    # 2>&1 | tee "${LOG_FILE}"
+# echo "Log saved to: ${LOG_FILE}"
+

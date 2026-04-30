@@ -20,7 +20,6 @@ from prismatic.models.backbones.vision import (
     IN1KViTBackbone,
     SigLIPViTBackbone,
     VJEPA21ViTBackbone,
-    VJEPAVisionBackbone,
     VisionBackbone,
 )
 from prismatic.models.vlms import PrismaticVLM
@@ -52,7 +51,6 @@ VISION_BACKBONES = {
     "dinosiglip-vit-so-384px": {"cls": DinoSigLIPViTBackbone, "kwargs": {"default_image_size": 384}},
 
     # === V-JEPA Backbone ===
-    "vjepa-vit-l": {"cls": VJEPAVisionBackbone, "kwargs": {"default_image_size": 224, "checkpoint_path": None}},
     "vjepa2_1-vit-b-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
     "vjepa2_1-vit-l-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
     "vjepa2_1-vit-g-384px": {"cls": VJEPA21ViTBackbone, "kwargs": {"default_image_size": 384}},
@@ -100,12 +98,10 @@ def get_vision_backbone_and_transform(
     """Instantiate a Vision Backbone, returning both the nn.Module wrapper class and default Image Transform."""
     if vision_backbone_id in VISION_BACKBONES:
         vision_cfg = VISION_BACKBONES[vision_backbone_id]
-        kwargs = dict(vision_cfg["kwargs"])
+        vision_kwargs = dict(vision_cfg["kwargs"])
         if checkpoint_path is not None:
-            kwargs["checkpoint_path"] = checkpoint_path
-        vision_backbone: VisionBackbone = vision_cfg["cls"](
-            vision_backbone_id, image_resize_strategy, image_sequence_len=image_sequence_len, **kwargs
-        )
+            vision_kwargs["checkpoint_path"] = checkpoint_path
+        vision_backbone: VisionBackbone = vision_cfg["cls"](vision_backbone_id, image_resize_strategy, **vision_kwargs)
         image_transform = vision_backbone.get_image_transform()
         return vision_backbone, image_transform
 
@@ -166,15 +162,13 @@ def get_llm_backbone_and_tokenizer(
 ) -> Tuple[LLMBackbone, PreTrainedTokenizerBase]:
     if llm_backbone_id in LLM_BACKBONES:
         llm_cfg = LLM_BACKBONES[llm_backbone_id]
-        kwargs = dict(llm_cfg["kwargs"])
-        if custom_hf_path is not None:
-            kwargs["custom_hf_path"] = custom_hf_path
         llm_backbone: LLMBackbone = llm_cfg["cls"](
             llm_backbone_id,
             llm_max_length=llm_max_length,
+            llm_path=custom_hf_path,
             hf_token=hf_token,
             inference_mode=inference_mode,
-            **kwargs,
+            **llm_cfg["kwargs"],
         )
         tokenizer = llm_backbone.get_tokenizer()
         return llm_backbone, tokenizer
