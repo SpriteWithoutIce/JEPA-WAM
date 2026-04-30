@@ -12,7 +12,7 @@ model configuration thereof. A given VLA model (`policy`) configures the followi
 from dataclasses import dataclass
 from enum import Enum, unique
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 from draccus import ChoiceRegistry
 
@@ -55,6 +55,13 @@ class VLAConfig(ChoiceRegistry):
     # V-JEPA Backbone Configuration
     vjepa_checkpoint_path: Optional[str] = None      # Path to V-JEPA 2.1 .pt checkpoint
     future_obs_window_size: int = 0                  # Number of future frames to extract for aux target
+
+    # LoRA / Adapter Fine-Tuning
+    use_lora: bool = False
+    lora_rank: int = 32
+    lora_alpha: int = 64
+    lora_dropout: float = 0.0
+    lora_target_modules: Union[str, Tuple[str, ...]] = "all-linear"
 
     # Action Head
     use_action_head: bool = True

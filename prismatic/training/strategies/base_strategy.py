@@ -8,6 +8,8 @@ Training Strategies (DDP, FSDP-Grad, FSDP-Full) tend to have a lot of repeated c
 heavy lifting.
 """
 
+import json
+import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, Optional
@@ -116,6 +118,67 @@ class TrainingStrategy(ABC):
 
     @abstractmethod
     def clip_grad_norm(self) -> None: ...
+
+    def _export_vla_checkpoint_dir(self, run_dir: Path, checkpoint_path: Path, model_state_dicts: dict) -> None:
+        """
+        Export a VLA-Adapter-style checkpoint directory next to the native training `.pt` checkpoint.
+
+        The native `.pt` file remains the source of truth for training resume. This export directory exists so
+        evaluation code can load LoRA adapters and auxiliary heads directly from a filesystem layout that mirrors
+        the VLA-Adapter project.
+        """
+        export_dir = checkpoint_path.with_suffix("")
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        for filename in ("config.json", "config.yaml", "dataset_statistics.json"):
+            src = run_dir / filename
+            if src.exists():
+                shutil.copy2(src, export_dir / filename)
+
+        with open(export_dir / "checkpoint-metadata.json", "w") as f:
+            json.dump(
+                {
+                    "source_checkpoint": checkpoint_path.name,
+                    "trainable_module_keys": list(self.trainable_module_keys),
+                    "stage": self.stage,
+                },
+                f,
+                indent=2,
+            )
+
+        vlm = getattr(self.vlm, "module", getattr(self.vlm, "_fsdp_wrapped_module", self.vlm))
+
+        llm_module = getattr(vlm.llm_backbone, "llm", None)
+        has_lora = llm_module is not None and hasattr(llm_module, "peft_config")
+        if has_lora:
+            from peft.utils.save_and_load import get_peft_model_state_dict
+
+            adapter_dir = export_dir / "lora_adapter"
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            adapter_name = next(iter(llm_module.peft_config.keys()))
+            llm_state_dict = {
+                key.removeprefix("llm."): value
+                for key, value in model_state_dicts.get("llm_backbone", {}).items()
+                if key.startswith("llm.")
+            }
+            adapter_state_dict = get_peft_model_state_dict(
+                llm_module,
+                state_dict=llm_state_dict,
+                adapter_name=adapter_name,
+            )
+            llm_module.peft_config[adapter_name].save_pretrained(adapter_dir)
+            torch.save(adapter_state_dict, adapter_dir / "adapter_model.bin")
+        elif "llm_backbone" in model_state_dicts:
+            torch.save(model_state_dicts["llm_backbone"], export_dir / "llm_backbone--checkpoint.pt")
+
+        if "vision_backbone" in model_state_dicts:
+            torch.save(model_state_dicts["vision_backbone"], export_dir / "vision_backbone--checkpoint.pt")
+        if "projector" in model_state_dicts:
+            torch.save(model_state_dicts["projector"], export_dir / "projector--checkpoint.pt")
+        if "action_head" in model_state_dicts:
+            torch.save(model_state_dicts["action_head"], export_dir / "action_head--checkpoint.pt")
+        if "aux_head" in model_state_dicts:
+            torch.save(model_state_dicts["aux_head"], export_dir / "aux_head--checkpoint.pt")
 
     def run_training(
         self,

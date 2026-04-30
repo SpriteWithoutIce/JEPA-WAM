@@ -43,6 +43,30 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 overwatch = initialize_overwatch(__name__)
 
 
+def apply_lora_to_vlm(vlm, vla_cfg: VLAConfig) -> None:
+    from peft import LoraConfig, get_peft_model
+
+    if hasattr(vlm.llm_backbone.llm, "peft_config"):
+        overwatch.info("LLM already wrapped with LoRA; skipping re-wrap.")
+        return
+
+    lora_config = LoraConfig(
+        r=vla_cfg.lora_rank,
+        lora_alpha=vla_cfg.lora_alpha,
+        target_modules=(
+            list(vla_cfg.lora_target_modules)
+            if isinstance(vla_cfg.lora_target_modules, tuple)
+            else vla_cfg.lora_target_modules
+        ),
+        lora_dropout=vla_cfg.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        init_lora_weights="gaussian",
+    )
+    vlm.llm_backbone.llm = get_peft_model(vlm.llm_backbone.llm, lora_config)
+    vlm.llm_backbone.llm.print_trainable_parameters()
+
+
 def build_vla_from_base_vlm(
     base_vlm_id_or_path: Union[str, Path],
     cfg: "TrainConfig",
@@ -98,6 +122,8 @@ def build_vla_from_base_vlm(
         inference_mode=False,
         custom_hf_path=llm_checkpoint_path,
     )
+    aux_spatial_side = vision_backbone.default_image_size // getattr(vision_backbone, "patch_size", 16)
+    aux_temporal_tokens = max(1, cfg.vla.future_obs_window_size // getattr(vision_backbone, "tubelet_size", 2))
     vlm = get_vlm(
         model_cfg["model_id"],
         model_cfg["arch_specifier"],
@@ -120,6 +146,10 @@ def build_vla_from_base_vlm(
         num_layers_aux=cfg.vla.num_layers_aux,
         ffn_ratio_aux=cfg.vla.ffn_ratio_aux,
         lambda_aux=cfg.vla.lambda_aux,
+        d_jepa=vision_backbone.embed_dim,
+        aux_T=aux_temporal_tokens,
+        aux_H=aux_spatial_side,
+        aux_W=aux_spatial_side,
     )
 
     # The base run only provides pretrained projector + LLM weights.
@@ -270,12 +300,23 @@ def train(cfg: TrainConfig) -> None:
                 image_sequence_len=cfg.vla.image_sequence_len,
             )
 
+    if cfg.vla.use_lora:
+        overwatch.info(
+            "Applying LoRA to LLM backbone "
+            f"(rank={cfg.vla.lora_rank}, alpha={cfg.vla.lora_alpha}, targets={cfg.vla.lora_target_modules})"
+        )
+        apply_lora_to_vlm(vlm, cfg.vla)
+
     # [Validate] Model should be in Full Precision!
     for param in vlm.parameters():
         assert param.dtype == torch.float32, f"Loaded VLM parameter not in full precision: {param}"
 
     # Determine training "stage" based on frozen vs unfrozen parameters --> supports different fine-tuning schemes!
-    if not cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
+    if cfg.vla.use_lora:
+        assert cfg.vla.freeze_vision_backbone, "LoRA training currently expects a frozen vision backbone."
+        assert not cfg.vla.unfreeze_last_llm_layer, "LoRA training and last-layer unfreezing are not combined here."
+        stage = "vla-lora-train"
+    elif not cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
         stage = "vla-full-train"  # Full fine-tuning
     elif cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
         stage = "vla-train"  # Frozen vision encoder

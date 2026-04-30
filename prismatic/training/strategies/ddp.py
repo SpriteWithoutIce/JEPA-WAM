@@ -51,6 +51,7 @@ class DDPStrategy(TrainingStrategy):
         # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
         torch.save({"model": model_state_dicts, "optimizer": optimizer_state_dict}, checkpoint_path)
         shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")
+        self._export_vla_checkpoint_dir(run_dir, checkpoint_path, model_state_dicts)
 
     def run_setup(self, run_dir: Path, n_train_examples: int) -> None:
         # Gradient Checkpointing Setup

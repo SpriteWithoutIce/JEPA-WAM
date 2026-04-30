@@ -8,8 +8,9 @@ IDs, mappings to paper experiments, and short descriptions), as well as for load
 import json
 import os
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
+import torch
 from huggingface_hub import HfFileSystem, hf_hub_download
 
 from prismatic.conf import ModelConfig
@@ -27,6 +28,78 @@ overwatch = initialize_overwatch(__name__)
 # === HF Hub Repository ===
 HF_HUB_REPO = "TRI-ML/prismatic-vlms"
 VLA_HF_HUB_REPO = "openvla/openvla-dev"
+
+
+def _apply_lora_to_llm_backbone(llm_backbone, vla_cfg: dict, is_trainable: bool) -> None:
+    from peft import LoraConfig, get_peft_model
+
+    llm = llm_backbone.llm
+    if hasattr(llm, "peft_config"):
+        return
+
+    target_modules = vla_cfg.get("lora_target_modules", "all-linear")
+    if isinstance(target_modules, list):
+        target_modules = tuple(target_modules)
+
+    llm_backbone.llm = get_peft_model(
+        llm,
+        LoraConfig(
+            r=vla_cfg.get("lora_rank", 32),
+            lora_alpha=vla_cfg.get("lora_alpha", 64),
+            target_modules=list(target_modules) if isinstance(target_modules, tuple) else target_modules,
+            lora_dropout=vla_cfg.get("lora_dropout", 0.0),
+            bias="none",
+            task_type="CAUSAL_LM",
+            init_lora_weights="gaussian",
+            inference_mode=not is_trainable,
+        ),
+    )
+
+
+def _resolve_vla_local_paths(model_id_or_path: Union[str, Path]) -> Tuple[Optional[Path], Optional[Path], Path, Path]:
+    path = Path(model_id_or_path)
+
+    if path.is_file():
+        overwatch.info(f"Loading from local checkpoint path `{path}`")
+        assert (path.suffix == ".pt") and (path.parent.name == "checkpoints"), "Invalid checkpoint!"
+        run_dir = path.parents[1]
+        return path, None, run_dir / "config.json", run_dir / "dataset_statistics.json"
+
+    if path.is_dir():
+        overwatch.info(f"Loading from local export/checkpoint directory `{path}`")
+        config_json = next((candidate for candidate in [path / "config.json", path.parent.parent / "config.json"] if candidate.exists()), None)
+        dataset_statistics_json = next(
+            (candidate for candidate in [path / "dataset_statistics.json", path.parent.parent / "dataset_statistics.json"] if candidate.exists()),
+            None,
+        )
+        if config_json is None or dataset_statistics_json is None:
+            raise ValueError(
+                f"Could not find `config.json` and `dataset_statistics.json` for local VLA directory `{path}`"
+            )
+        return None, path, config_json, dataset_statistics_json
+
+    raise ValueError(f"Local path `{model_id_or_path}` is neither a checkpoint file nor a checkpoint directory.")
+
+
+def _load_base_vlm_checkpoint_state(base_vlm_run_dir: Union[str, Path]) -> dict:
+    run_dir = Path(base_vlm_run_dir)
+    checkpoint_dir = run_dir / "checkpoints"
+    latest_checkpoint = checkpoint_dir / "latest-checkpoint.pt"
+    checkpoint_pt = latest_checkpoint if latest_checkpoint.exists() else None
+    if checkpoint_pt is None:
+        checkpoint_candidates = sorted(checkpoint_dir.glob("step-*.pt"))
+        if not checkpoint_candidates:
+            raise ValueError(f"Could not find a base VLM checkpoint under `{checkpoint_dir}`")
+        checkpoint_pt = checkpoint_candidates[-1]
+    return torch.load(checkpoint_pt, map_location="cpu")["model"]
+
+
+def _find_component_checkpoint(export_dir: Path, stem: str) -> Optional[Path]:
+    direct = export_dir / f"{stem}--checkpoint.pt"
+    if direct.exists():
+        return direct
+    matches = sorted(export_dir.glob(f"{stem}--*.pt"))
+    return matches[-1] if matches else None
 
 
 # === Available Models ===
@@ -146,21 +219,12 @@ def load_vla(
     llm_checkpoint_path: Optional[str] = None,
 ) -> OpenVLA:
     """Loads a pretrained OpenVLA from either local disk or the HuggingFace Hub."""
-
-    # TODO (siddk, moojink) :: Unify semantics with `load()` above; right now, `load_vla()` assumes path points to
-    #   checkpoint `.pt` file, rather than the top-level run directory!
-    # import pdb; pdb.set_trace()
-    if os.path.isfile(model_id_or_path):
-        overwatch.info(f"Loading from local checkpoint path `{(checkpoint_pt := Path(model_id_or_path))}`")
-
-        # [Validate] Checkpoint Path should look like `.../<RUN_ID>/checkpoints/<CHECKPOINT_PATH>.pt`
-        assert (checkpoint_pt.suffix == ".pt") and (checkpoint_pt.parent.name == "checkpoints"), "Invalid checkpoint!"
-        run_dir = checkpoint_pt.parents[1]
-
-        # Get paths for `config.json`, `dataset_statistics.json` and pretrained checkpoint
-        config_json, dataset_statistics_json = run_dir / "config.json", run_dir / "dataset_statistics.json"
-        assert config_json.exists(), f"Missing `config.json` for `{run_dir = }`"
-        assert dataset_statistics_json.exists(), f"Missing `dataset_statistics.json` for `{run_dir = }`"
+    checkpoint_pt, export_dir = None, None
+    local_path = Path(model_id_or_path)
+    if local_path.exists():
+        checkpoint_pt, export_dir, config_json, dataset_statistics_json = _resolve_vla_local_paths(local_path)
+        assert config_json.exists(), f"Missing `config.json` for `{model_id_or_path = }`"
+        assert dataset_statistics_json.exists(), f"Missing `dataset_statistics.json` for `{model_id_or_path = }`"
 
     # Otherwise =>> try looking for a match on `model_id_or_path` on the HF Hub (`VLA_HF_HUB_REPO`)
     else:
@@ -193,8 +257,10 @@ def load_vla(
 
     # Load VLA Config (and corresponding base VLM `ModelConfig`) from `config.json`
     with open(config_json, "r") as f:
-        vla_cfg = json.load(f)["vla"]
+        full_cfg = json.load(f)
+        vla_cfg = full_cfg["vla"]
         base_vlm = vla_cfg["base_vlm"]
+        base_vlm_source = base_vlm
 
     # if base vlm is a folder, load its config.json (only works for native format!)
     # this might happen if you start a run who's base vlm is from a folder instead of from hf
@@ -250,7 +316,7 @@ def load_vla(
         llm_max_length=model_cfg.llm_max_length,
         hf_token=hf_token,
         inference_mode=not load_for_training,
-        custom_hf_path=llm_checkpoint_path,
+        custom_hf_path=llm_checkpoint_path or full_cfg.get("llm_checkpoint_path"),
     )
 
     # Create Action Tokenizer
@@ -279,19 +345,71 @@ def load_vla(
     ):
         if key in vla_cfg:
             vla_head_kwargs[key] = vla_cfg[key]
+    use_lora = vla_cfg.get("use_lora", False)
 
-    # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
-    overwatch.info(f"Loading VLA [bold blue]{model_cfg.model_id}[/] from Checkpoint")
-    vla = OpenVLA.from_pretrained(
-        checkpoint_pt,
+    if checkpoint_pt is not None:
+        if use_lora:
+            _apply_lora_to_llm_backbone(llm_backbone, vla_cfg, is_trainable=load_for_training)
+
+        overwatch.info(f"Loading VLA [bold blue]{model_cfg.model_id}[/] from Checkpoint")
+        return OpenVLA.from_pretrained(
+            checkpoint_pt,
+            model_cfg.model_id,
+            vision_backbone,
+            llm_backbone,
+            arch_specifier=model_cfg.arch_specifier,
+            freeze_weights=not load_for_training,
+            norm_stats=norm_stats,
+            action_tokenizer=action_tokenizer,
+            **vla_head_kwargs,
+        )
+
+    assert export_dir is not None, "Expected either a native checkpoint file or an export directory."
+    if not os.path.isdir(base_vlm_source):
+        raise ValueError(
+            "Directory-style VLA exports currently require `vla.base_vlm` in config to point to a local base VLM run."
+        )
+
+    overwatch.info(f"Loading VLA [bold blue]{model_cfg.model_id}[/] from Export Directory")
+    vla = OpenVLA(
         model_cfg.model_id,
         vision_backbone,
         llm_backbone,
         arch_specifier=model_cfg.arch_specifier,
-        freeze_weights=not load_for_training,
         norm_stats=norm_stats,
         action_tokenizer=action_tokenizer,
         **vla_head_kwargs,
     )
+
+    base_state_dict = _load_base_vlm_checkpoint_state(base_vlm_source)
+    vla.projector.load_state_dict(base_state_dict["projector"])
+    vla.llm_backbone.load_state_dict(base_state_dict["llm_backbone"])
+
+    if (vision_ckpt := _find_component_checkpoint(export_dir, "vision_backbone")) is not None:
+        vla.vision_backbone.load_state_dict(torch.load(vision_ckpt, map_location="cpu"))
+    if (projector_ckpt := _find_component_checkpoint(export_dir, "projector")) is not None:
+        vla.projector.load_state_dict(torch.load(projector_ckpt, map_location="cpu"))
+    if use_lora:
+        from peft import PeftModel
+
+        adapter_dir = export_dir / "lora_adapter"
+        if not adapter_dir.exists():
+            raise ValueError(f"Expected LoRA adapter directory at `{adapter_dir}`")
+        vla.llm_backbone.llm = PeftModel.from_pretrained(
+            vla.llm_backbone.llm,
+            adapter_dir,
+            is_trainable=load_for_training,
+        )
+    elif (llm_ckpt := _find_component_checkpoint(export_dir, "llm_backbone")) is not None:
+        vla.llm_backbone.load_state_dict(torch.load(llm_ckpt, map_location="cpu"))
+
+    if vla.action_head is not None and (action_ckpt := _find_component_checkpoint(export_dir, "action_head")) is not None:
+        vla.action_head.load_state_dict(torch.load(action_ckpt, map_location="cpu"))
+    if vla.aux_head is not None and (aux_ckpt := _find_component_checkpoint(export_dir, "aux_head")) is not None:
+        vla.aux_head.load_state_dict(torch.load(aux_ckpt, map_location="cpu"))
+
+    if not load_for_training:
+        vla.requires_grad_(False)
+        vla.eval()
 
     return vla

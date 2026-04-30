@@ -173,6 +173,43 @@ class VJEPA21ViTBackbone(VisionBackbone):
             )
         return out
 
+    def encode_future(self, future_pixel_values: torch.Tensor) -> torch.Tensor:
+        if future_pixel_values.ndim == 5:
+            batch_size, num_frames, channels, height, width = future_pixel_values.shape
+            num_views = 1
+            x = future_pixel_values.permute(0, 2, 1, 3, 4)
+        elif future_pixel_values.ndim == 6:
+            batch_size, num_views, num_frames, channels, height, width = future_pixel_values.shape
+            x = future_pixel_values.reshape(batch_size * num_views, num_frames, channels, height, width).permute(
+                0, 2, 1, 3, 4
+            )
+        else:
+            raise ValueError(
+                "Expected future image tensor of shape [B, T, 3, H, W] or [B, V, T, 3, H, W], "
+                f"got {tuple(future_pixel_values.shape)}"
+            )
+
+        x = x.to(device=next(self.featurizer.parameters()).device, dtype=next(self.featurizer.parameters()).dtype)
+        out = self.featurizer(x)
+        if isinstance(out, list):
+            out = out[-1]
+
+        temporal_tokens = max(1, num_frames // self.tubelet_size)
+        spatial_side = self.default_image_size // self.patch_size
+        expected_tokens = temporal_tokens * spatial_side * spatial_side
+        if out.shape[1] != expected_tokens:
+            raise ValueError(
+                f"Unexpected V-JEPA future token count: got {out.shape[1]}, expected {expected_tokens} "
+                f"(T={num_frames}, tubelet={self.tubelet_size}, side={spatial_side})"
+            )
+
+        if num_views == 1:
+            return out.reshape(batch_size, temporal_tokens, spatial_side, spatial_side, out.shape[-1]).detach()
+
+        return out.reshape(
+            batch_size, num_views, temporal_tokens, spatial_side, spatial_side, out.shape[-1]
+        ).detach()
+
     @property
     def default_image_resolution(self) -> Tuple[int, int, int]:
         return (3, self.default_image_size, self.default_image_size)

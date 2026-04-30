@@ -233,14 +233,14 @@ class PrismaticVLM(VLM):
         elif stage in {"finetune", "vla-train"}:
             self.vision_backbone.requires_grad_(False)
             self.llm_backbone.requires_grad_(True)
-            self.projector.requires_grad_(True)
+            self.projector.requires_grad_(False)
             if self.action_head is not None:
                 self.action_head.requires_grad_(True)
             if self.aux_head is not None:
                 self.aux_head.requires_grad_(True)
 
             # Add to `self.trainable_module_keys`
-            self.trainable_module_keys = ["projector", "llm_backbone"]
+            self.trainable_module_keys = ["llm_backbone"]
             if self.action_head is not None:
                 self.trainable_module_keys.append("action_head")
             if self.aux_head is not None:
@@ -252,7 +252,7 @@ class PrismaticVLM(VLM):
             # Explicitly Log Frozen / Unfrozen Components
             overwatch.info(f"[Frozen]    🥶 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)
-            overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            overwatch.info(f"[Frozen]    🥶 =>> Projector `{self.arch_specifier}`", ctx_level=1)
             if self.action_head is not None:
                 log_action_head_trainable()
             if self.aux_head is not None:
@@ -262,14 +262,14 @@ class PrismaticVLM(VLM):
             self.vision_backbone.dtype = torch.float32
             self.vision_backbone.requires_grad_(True)
             self.llm_backbone.requires_grad_(True)
-            self.projector.requires_grad_(True)
+            self.projector.requires_grad_(False)
             if self.action_head is not None:
                 self.action_head.requires_grad_(True)
             if self.aux_head is not None:
                 self.aux_head.requires_grad_(True)
 
             # Add to `self.trainable_module_keys`
-            self.trainable_module_keys = ["vision_backbone", "projector", "llm_backbone"]
+            self.trainable_module_keys = ["vision_backbone", "llm_backbone"]
             if self.action_head is not None:
                 self.trainable_module_keys.append("action_head")
             if self.aux_head is not None:
@@ -281,7 +281,7 @@ class PrismaticVLM(VLM):
             # Explicitly Log Frozen / Unfrozen Components
             overwatch.info(f"[TRAINABLE] 🔥 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)
-            overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            overwatch.info(f"[Frozen]    🥶 =>> Projector `{self.arch_specifier}`", ctx_level=1)
             log_action_head_trainable()
             if self.aux_head is not None:
                 overwatch.info(f"[TRAINABLE] 🔥 =>> Aux Head", ctx_level=1)
@@ -311,7 +311,7 @@ class PrismaticVLM(VLM):
         elif stage in {"vla-sandwich-train"}:
             self.vision_backbone.dtype = torch.float32
             self.vision_backbone.requires_grad_(True)
-            self.projector.requires_grad_(True)
+            self.projector.requires_grad_(False)
             self.llm_backbone.requires_grad_(False)
 
             # Unfreeze final LLM layer
@@ -323,7 +323,7 @@ class PrismaticVLM(VLM):
                 self.aux_head.requires_grad_(True)
 
             # Add to `self.trainable_module_keys`
-            self.trainable_module_keys = ["vision_backbone", "projector", "llm_backbone"]
+            self.trainable_module_keys = ["vision_backbone", "llm_backbone"]
             if self.action_head is not None:
                 self.trainable_module_keys.append("action_head")
             if self.aux_head is not None:
@@ -336,11 +336,46 @@ class PrismaticVLM(VLM):
             # fmt: off
             overwatch.info(f"[TRAINABLE]                 🔥   =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)  # noqa: E501
             overwatch.info(f"[Frozen, except last layer] 🥶🔥 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)  # noqa: E501
-            overwatch.info(f"[TRAINABLE]                 🔥   =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            overwatch.info(f"[Frozen]                    🥶   =>> Projector `{self.arch_specifier}`", ctx_level=1)
             log_action_head_trainable("[TRAINABLE]                 🔥   =>>")
             if self.aux_head is not None:
                 overwatch.info(f"[TRAINABLE]                 🔥   =>> Aux Head", ctx_level=1)
             # fmt: on
+
+        elif stage in {"vla-lora-train"}:
+            self.vision_backbone.requires_grad_(False)
+            self.projector.requires_grad_(False)
+            self.llm_backbone.requires_grad_(False)
+
+            lora_param_names = []
+            for name, param in self.llm_backbone.named_parameters():
+                if "lora_" in name:
+                    param.requires_grad_(True)
+                    lora_param_names.append(name)
+
+            if self.action_head is not None:
+                self.action_head.requires_grad_(True)
+            if self.aux_head is not None:
+                self.aux_head.requires_grad_(True)
+
+            self.trainable_module_keys = ["llm_backbone"]
+            if self.action_head is not None:
+                self.trainable_module_keys.append("action_head")
+            if self.aux_head is not None:
+                self.trainable_module_keys.append("aux_head")
+
+            self.vision_backbone_requires_grad = False
+
+            overwatch.info(f"[Frozen]    🥶 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
+            overwatch.info(f"[Frozen]    🥶 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+            overwatch.info(
+                f"[TRAINABLE] 🔥 =>> LLM LoRA Adapters (`{len(lora_param_names)}` parameter groups matched)",
+                ctx_level=1,
+            )
+            if self.action_head is not None:
+                log_action_head_trainable()
+            if self.aux_head is not None:
+                overwatch.info(f"[TRAINABLE] 🔥 =>> Aux Head", ctx_level=1)
 
         else:
             raise ValueError(f"Stage `{stage}` is not supported for LLaVa! Try < align | finetune >")
