@@ -127,6 +127,9 @@ def build_vla_from_base_vlm(
     # while VLA heads are newly initialized for Libero training.
     vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
     vlm.projector.load_state_dict(model_state_dict["projector"])
+    # V-JEPA checkpoints can come in bf16; keep training initialization consistent
+    # with the rest of the codepath by materializing the full train-time model in fp32.
+    vlm = vlm.to(dtype=torch.float32)
     return vlm
 
 

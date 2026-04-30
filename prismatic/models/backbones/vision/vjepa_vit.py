@@ -150,14 +150,27 @@ class VJEPA21ViTBackbone(VisionBackbone):
         return partial(_or_policy, policies=[vit_wrap_policy, transformer_block_policy])
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        if pixel_values.ndim != 4:
-            raise ValueError(f"Expected image tensor of shape [B, 3, H, W], got {tuple(pixel_values.shape)}")
+        if pixel_values.ndim == 4:
+            x = pixel_values.unsqueeze(2)
+            batch_size = pixel_values.shape[0]
+            num_views = 1
+        elif pixel_values.ndim == 5:
+            batch_size, num_views, channels, height, width = pixel_values.shape
+            x = pixel_values.reshape(batch_size * num_views, channels, height, width).unsqueeze(2)
+        else:
+            raise ValueError(
+                "Expected image tensor of shape [B, 3, H, W] or [B, V, 3, H, W], "
+                f"got {tuple(pixel_values.shape)}"
+            )
 
-        x = pixel_values.unsqueeze(2)
         x = x.to(device=next(self.featurizer.parameters()).device, dtype=next(self.featurizer.parameters()).dtype)
         out = self.featurizer(x)
         if isinstance(out, list):
             out = out[-1]
+        if num_views > 1:
+            out = out.reshape(batch_size, num_views, out.shape[1], out.shape[2]).reshape(
+                batch_size, num_views * out.shape[1], out.shape[2]
+            )
         return out
 
     @property
