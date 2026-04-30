@@ -18,14 +18,19 @@ torchrun --standalone --nnodes 1 --nproc-per-node 2 vla-scripts/train.py \
     --run_root_dir ./runs \
     --vla.expected_world_size 2 \
     --vla.global_batch_size 64 \
-    --vla.per_device_batch_size 16 \
+    --vla.per_device_batch_size 4 \
     --vla.learning_rate 2e-4 \
     --vla.max_steps 45000 \
     --vla.shuffle_buffer_size 10000 \
+    --vla.use_lora True \
+    --vla.freeze_vision_backbone True \
+    --vla.lora_rank 32 \
+    --vla.lora_alpha 64 \
+    --vla.lora_dropout 0.1 \
     --vla.action_head_type l1 \
     --vla.future_obs_window_size 8 \
     --vla.use_aux_head True \
-    --use_wrist_image True \
+    --use_wrist_image False \
     --save_interval 5000 \
     --seed 7 \
     --use_wandb False \
