@@ -33,8 +33,10 @@ torchrun --standalone --nnodes 1 --nproc-per-node 4 vla-scripts/train.py \
     --use_wrist_image False \
     --save_interval 5000 \
     --seed 7 \
-    --use_wandb True \
+    --use_wandb False \
     --debug_batch_shapes False \
+    --debug_memory_stats True \
+    --debug_memory_stats_interval 1
 #     2>&1 | tee "${LOG_FILE}"
 # echo "Log saved to: ${LOG_FILE}"
 
