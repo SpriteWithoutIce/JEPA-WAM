@@ -457,7 +457,13 @@ def run_task(
 
         # Save replay video
         save_rollout_video(
-            replay_images, total_episodes, success=success, task_description=task_description, log_file=log_file, save_version=save_version
+            replay_images,
+            total_episodes,
+            success=success,
+            task_description=task_description,
+            log_file=log_file,
+            save_version=save_version,
+            task_suite_name=cfg.task_suite_name,
         )
 
         # Log results
