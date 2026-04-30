@@ -594,16 +594,42 @@ class AuxQueries(nn.Module):
         return q
 
 
+class AuxAttentionLayer(nn.Module):
+    """Pre-norm auxiliary attention layer with configurable cross/self attention."""
+
+    def __init__(self, d: int, n_heads: int, use_cross_attn: bool = True, use_self_attn: bool = True):
+        super().__init__()
+        self.use_cross_attn = use_cross_attn
+        self.use_self_attn = use_self_attn
+        self.norm1 = nn.LayerNorm(d)
+        self.cross_attn = nn.MultiheadAttention(d, n_heads, batch_first=True) if use_cross_attn else None
+        self.norm2 = nn.LayerNorm(d)
+        self.self_attn = nn.MultiheadAttention(d, n_heads, batch_first=True) if use_self_attn else None
+
+    def forward(self, queries: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        if self.use_cross_attn:
+            h = self.norm1(queries)
+            h, _ = self.cross_attn(h, memory, memory)
+            queries = queries + h
+
+        if self.use_self_attn:
+            h = self.norm2(queries)
+            h, _ = self.self_attn(h, h, h)
+            queries = queries + h
+
+        return queries
+
+
 class AuxDecoderBlock(nn.Module):
-    """Standard pre-norm transformer decoder block: CrossAttn -> SelfAttn -> FFN."""
+    """One auxiliary decoder block: 1 self-attn, 4 cross-attn, then 1 FFN."""
 
     def __init__(self, d: int, n_heads: int, ffn_ratio: int = 4):
         super().__init__()
-        self.norm1 = nn.LayerNorm(d)
-        self.cross_attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
-        self.norm2 = nn.LayerNorm(d)
-        self.self_attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
-        self.norm3 = nn.LayerNorm(d)
+        self.self_layer = AuxAttentionLayer(d, n_heads, use_cross_attn=False, use_self_attn=True)
+        self.cross_layers = nn.ModuleList(
+            [AuxAttentionLayer(d, n_heads, use_cross_attn=True, use_self_attn=False) for _ in range(4)]
+        )
+        self.norm = nn.LayerNorm(d)
         self.ffn = nn.Sequential(
             nn.Linear(d, d * ffn_ratio),
             nn.GELU(),
@@ -611,18 +637,10 @@ class AuxDecoderBlock(nn.Module):
         )
 
     def forward(self, queries: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
-        # Cross-attention: query -> memory
-        h = self.norm1(queries)
-        h, _ = self.cross_attn(h, memory, memory)
-        queries = queries + h
-
-        # Self-attention: query <-> query
-        h = self.norm2(queries)
-        h, _ = self.self_attn(h, h, h)
-        queries = queries + h
-
-        # FFN
-        h = self.norm3(queries)
+        queries = self.self_layer(queries, memory)
+        for layer in self.cross_layers:
+            queries = layer(queries, memory)
+        h = self.norm(queries)
         queries = queries + self.ffn(h)
         return queries
 
@@ -660,10 +678,9 @@ class AuxHead(nn.Module):
         self.query_proj = nn.Linear(d_aux, d_aux)
         self.memory_proj = nn.Linear(d_llm, d_aux)
 
-        self.blocks = nn.ModuleList([
-            AuxDecoderBlock(d_aux, n_heads, ffn_ratio)
-            for _ in range(num_layers)
-        ])
+        # Sparse schedule to cap quadratic query-query cost:
+        # 3 blocks, each = 1 self-attn + 4 cross-attn + 1 FFN.
+        self.blocks = nn.ModuleList([AuxDecoderBlock(d_aux, n_heads, ffn_ratio) for _ in range(3)])
 
         self.final_norm = nn.LayerNorm(d_aux)
         self.output_proj = nn.Linear(d_aux, d_jepa)
